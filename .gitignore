@@ -1,0 +1,9 @@
+# Lake / Lean build output
+/.lake/
+
+# Legacy Lake packages dir (older setups)
+/lake-packages/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db

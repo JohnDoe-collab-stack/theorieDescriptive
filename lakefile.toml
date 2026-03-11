@@ -1,0 +1,29 @@
+name = "theorieDescriptive"
+version = "0.1.0"
+defaultTargets = ["Descriptive"]
+
+[[lean_lib]]
+name = "Descriptive"
+roots = [
+  "Descriptive.Core",
+  "Descriptive.Syntax",
+  "Descriptive.Semantics",
+  "Descriptive.Russell",
+  "Descriptive.Extensionality",
+  "Descriptive.FreeLogic",
+  "Descriptive.Trajectory",
+  "Descriptive.FaithfulMain",
+  "Descriptive.FaithfulRussell",
+  "Descriptive.FaithfulExtensionality",
+  "Descriptive.FaithfulTrajectory",
+  "Descriptive.FiniteSemanticsBuilder",
+  "Descriptive.FiniteGlobal",
+  "Descriptive.FiniteRelative",
+  "Descriptive.FiniteExtensionality",
+  "Descriptive.FiniteTheorems",
+  "Descriptive.FiniteMain",
+  "Descriptive.ConcreteInstance",
+  "Descriptive.ConcreteInstance2",
+  "Descriptive.ConcreteInstance3",
+  "Descriptive.ConcreteInstance4",
+]
