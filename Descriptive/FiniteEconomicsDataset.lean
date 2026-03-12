@@ -737,7 +737,7 @@ def incomingMax {α : Type} [DecidableEq α] (u : α → Nat) (v : α) : List (C
   | [] => 0
   | c :: cs =>
       if c.dst = v then
-        Nat.max (u c.src + c.w) (incomingMax u v cs)
+        max (u c.src + c.w) (incomingMax u v cs)
       else
         incomingMax u v cs
 
@@ -762,10 +762,144 @@ theorem incomingMax_congr {α : Type} [DecidableEq α] {u u' : α → Nat} (v : 
         exact ih
 
 def relaxOnce {α : Type} [DecidableEq α] (cs : List (Constraint α)) (u : α → Nat) : α → Nat :=
-  fun v => Nat.max (u v) (incomingMax u v cs)
+  fun v => max (u v) (incomingMax u v cs)
+
+/-!
+### Canonical minimal rationalizer (pointwise)
+
+The operator `relaxOnce cs` propagates revealed-inequality lower bounds.
+If a function `u` already satisfies all constraints, then `relaxOnce cs u = u`.
+Moreover, iterating from the bottom function `0` yields a **pointwise minimal**
+candidate among all satisfying utilities.
+-/
+
+def FunLe {α : Type} (u v : α → Nat) : Prop :=
+  ∀ x : α, u x ≤ v x
+
+theorem nat_le_max_left (a b : Nat) : a ≤ max a b := by
+  rw [Nat.max_def]
+  by_cases h : a ≤ b
+  · rw [if_pos h]
+    exact h
+  · rw [if_neg h]
+    exact Nat.le_refl a
+
+theorem nat_le_max_right (a b : Nat) : b ≤ max a b := by
+  rw [Nat.max_def]
+  by_cases h : a ≤ b
+  · rw [if_pos h]
+    exact Nat.le_refl b
+  · rw [if_neg h]
+    have hlt : b < a := Nat.lt_of_not_ge h
+    exact Nat.le_of_lt hlt
+
+theorem nat_max_le_of_le {a b c : Nat} (ha : a ≤ c) (hb : b ≤ c) : max a b ≤ c := by
+  rw [Nat.max_def]
+  by_cases h : a ≤ b
+  · rw [if_pos h]
+    exact hb
+  · rw [if_neg h]
+    exact ha
+
+theorem nat_max_eq_left_of_le {a b : Nat} (h : b ≤ a) : max a b = a := by
+  rw [Nat.max_def]
+  by_cases hab : a ≤ b
+  · rw [if_pos hab]
+    have habEq : a = b := Nat.le_antisymm hab h
+    exact habEq.symm
+  · rw [if_neg hab]
+
+theorem nat_max_le_max {a b c d : Nat} (hac : a ≤ c) (hbd : b ≤ d) : max a b ≤ max c d := by
+  have ha' : a ≤ max c d := Nat.le_trans hac (nat_le_max_left c d)
+  have hb' : b ≤ max c d := Nat.le_trans hbd (nat_le_max_right c d)
+  exact nat_max_le_of_le ha' hb'
+
+theorem incomingMax_mono {α : Type} [DecidableEq α] {u u' : α → Nat} (h : FunLe u u') (v : α) :
+    ∀ cs : List (Constraint α), incomingMax u v cs ≤ incomingMax u' v cs := by
+  intro cs
+  induction cs with
+  | nil =>
+      dsimp [incomingMax]
+      exact Nat.le_refl 0
+  | cons c cs ih =>
+      dsimp [incomingMax]
+      by_cases hdst : c.dst = v
+      · rw [if_pos hdst]
+        rw [if_pos hdst]
+        have hsrc : u c.src + c.w ≤ u' c.src + c.w :=
+          Nat.add_le_add_right (h c.src) c.w
+        exact nat_max_le_max hsrc ih
+      · rw [if_neg hdst]
+        rw [if_neg hdst]
+        exact ih
+
+theorem relaxOnce_mono {α : Type} [DecidableEq α] (cs : List (Constraint α)) {u u' : α → Nat}
+    (h : FunLe u u') : FunLe (relaxOnce cs u) (relaxOnce cs u') := by
+  intro v
+  dsimp [relaxOnce]
+  exact nat_max_le_max (h v) (incomingMax_mono (v := v) h cs)
+
+theorem incomingMax_le_of_satisfiesConstraints {α : Type} [DecidableEq α] (u : α → Nat) :
+    ∀ (cs : List (Constraint α)), SatisfiesConstraints u cs → ∀ v : α, incomingMax u v cs ≤ u v := by
+  intro cs hSat
+  induction cs with
+  | nil =>
+      intro v
+      dsimp [incomingMax]
+      exact Nat.zero_le (u v)
+  | cons c cs ih =>
+      intro v
+      dsimp [incomingMax]
+      by_cases hdst : c.dst = v
+      · rw [if_pos hdst]
+        have hEdge0 : u c.src + c.w ≤ u c.dst :=
+          hSat c (List.Mem.head cs)
+        have hEdge : u c.src + c.w ≤ u v := by
+          cases hdst
+          exact hEdge0
+        have hSatTail : SatisfiesConstraints u cs := by
+          intro c' hc'
+          exact hSat c' (List.Mem.tail c hc')
+        have hTail : incomingMax u v cs ≤ u v := ih hSatTail v
+        exact nat_max_le_of_le hEdge hTail
+      · rw [if_neg hdst]
+        have hSatTail : SatisfiesConstraints u cs := by
+          intro c' hc'
+          exact hSat c' (List.Mem.tail c hc')
+        exact ih hSatTail v
+
+theorem relaxOnce_eq_of_satisfiesConstraints {α : Type} [DecidableEq α] (cs : List (Constraint α)) (u : α → Nat)
+    (hSat : SatisfiesConstraints u cs) : ∀ v : α, relaxOnce cs u v = u v := by
+  intro v
+  dsimp [relaxOnce]
+  have hInc : incomingMax u v cs ≤ u v := incomingMax_le_of_satisfiesConstraints (u := u) cs hSat v
+  exact nat_max_eq_left_of_le hInc
+
+theorem relaxOnce_le_of_satisfiesConstraints {α : Type} [DecidableEq α] (cs : List (Constraint α)) (u u' : α → Nat)
+    (hSat : SatisfiesConstraints u' cs) (h : FunLe u u') : FunLe (relaxOnce cs u) u' := by
+  have hMono : FunLe (relaxOnce cs u) (relaxOnce cs u') := relaxOnce_mono (cs := cs) h
+  intro v
+  have hEq : relaxOnce cs u' v = u' v := relaxOnce_eq_of_satisfiesConstraints (cs := cs) (u := u') hSat v
+  have hLe : relaxOnce cs u' v ≤ u' v := by
+    rw [hEq]
+    exact Nat.le_refl (u' v)
+  exact Nat.le_trans (hMono v) hLe
 
 def iterate {α : Type} (n : Nat) (f : α → α) (x : α) : α :=
   Nat.rec x (fun _ acc => f acc) n
+
+theorem iterate_relaxOnce_le_of_satisfiesConstraints {α : Type} [DecidableEq α] (cs : List (Constraint α)) (u : α → Nat)
+    (hSat : SatisfiesConstraints u cs) :
+    ∀ n : Nat, FunLe (iterate n (relaxOnce cs) (fun _ => 0)) u := by
+  intro n
+  induction n with
+  | zero =>
+      intro v
+      dsimp [iterate]
+      exact Nat.zero_le (u v)
+  | succ n ih =>
+      dsimp [iterate]
+      exact relaxOnce_le_of_satisfiesConstraints (cs := cs) (u := iterate n (relaxOnce cs) (fun _ => 0)) (u' := u) hSat ih
 
 def solveUtility (C : FiniteDescriptiveCore) (data : List (Observation C)) : Option (C.Obj → Nat) :=
   let cs := ConstraintsOfDataset C data
@@ -917,6 +1051,43 @@ theorem solveUtilityResult_success_sound (C : FiniteDescriptiveCore) (data : Lis
               exact hFind
             )
       exact (rationalizesDataset_iff_satisfiesConstraints (C := C) (u := uCand) (data := data)).2 hSat
+
+abbrev canonicalUtility (C : FiniteDescriptiveCore) (data : List (Observation C)) : C.Obj → Nat :=
+  iterate C.allObjs.length (relaxOnce (ConstraintsOfDataset C data)) (fun _ => 0)
+
+theorem canonicalUtility_le_of_rationalizesDataset (C : FiniteDescriptiveCore) (data : List (Observation C))
+    {u : C.Obj → Nat} :
+    RationalizesDataset C u data → FunLe (canonicalUtility C data) u := by
+  intro hR
+  have hSat : SatisfiesConstraints u (ConstraintsOfDataset C data) :=
+    (rationalizesDataset_iff_satisfiesConstraints (C := C) (u := u) (data := data)).1 hR
+  dsimp [canonicalUtility]
+  exact
+    iterate_relaxOnce_le_of_satisfiesConstraints
+      (cs := ConstraintsOfDataset C data) (u := u) hSat C.allObjs.length
+
+theorem solveUtilityResult_success_minimal (C : FiniteDescriptiveCore) (data : List (Observation C))
+    {u : C.Obj → Nat} :
+    solveUtilityResult C data = SolveResult.success u →
+      ∀ u' : C.Obj → Nat, RationalizesDataset C u' data → FunLe u u' := by
+  intro hRes u' hR'
+  dsimp [solveUtilityResult] at hRes
+  cases hFind :
+      findFirstViolation
+        (iterate C.allObjs.length (relaxOnce (ConstraintsOfDataset C data)) (fun _ => 0))
+        (ConstraintsOfDataset C data) with
+  | some c =>
+      rw [hFind] at hRes
+      cases hRes
+  | none =>
+      rw [hFind] at hRes
+      cases hRes
+      exact canonicalUtility_le_of_rationalizesDataset (C := C) (data := data) hR'
+
+structure MinimalRationalizerCert (C : FiniteDescriptiveCore) (data : List (Observation C)) : Type where
+  u : C.Obj → Nat
+  rationalizes : RationalizesDataset C u data
+  minimal : ∀ u' : C.Obj → Nat, RationalizesDataset C u' data → FunLe u u'
 
 theorem solveUtilityResult_fail_sound (C : FiniteDescriptiveCore) (data : List (Observation C))
     {u : C.Obj → Nat} {c : Constraint C.Obj} :
@@ -2892,7 +3063,7 @@ def solveUtilityResult_fail_implies_positiveCycleCert (C : FiniteDescriptiveCore
     dsimp [relaxOnce]
     have hle : u c.dst ≤ incomingMax u c.dst cs := Nat.le_of_lt hInc'
     -- `max (u dst) incoming = incoming`
-    have hmax : Nat.max (u c.dst) (incomingMax u c.dst cs) = incomingMax u c.dst cs :=
+    have hmax : max (u c.dst) (incomingMax u c.dst cs) = incomingMax u c.dst cs :=
       Nat.max_eq_right hle
     rw [hmax]
     exact hInc'
@@ -3004,6 +3175,17 @@ def rationalityTest (C : FiniteDescriptiveCore) (data : List (Observation C)) :
   | SolveResult.fail u c =>
       Sum.inr (solveUtilityResult_fail_implies_positiveCycleCert (C := C) (data := data) (u := u) (c := c) h)
 
+def rationalityTestMinimal (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    Sum (MinimalRationalizerCert C data) (PositiveCycleCert (ConstraintsOfDataset C data)) :=
+  match h : solveUtilityResult C data with
+  | SolveResult.success u =>
+      Sum.inl
+        ⟨u,
+          solveUtilityResult_success_sound (C := C) (data := data) (u := u) h,
+          solveUtilityResult_success_minimal (C := C) (data := data) (u := u) h⟩
+  | SolveResult.fail u c =>
+      Sum.inr (solveUtilityResult_fail_implies_positiveCycleCert (C := C) (data := data) (u := u) (c := c) h)
+
 /- AXIOM_AUDIT_BEGIN -/
 /-!
 ## Axiom audit
@@ -3013,6 +3195,7 @@ def rationalityTest (C : FiniteDescriptiveCore) (data : List (Observation C)) :
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.satisfiesConstraints_implies_demandChoice_eq_some
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtility_sound
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_success_sound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_success_minimal
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_sound
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.positiveCycle_implies_not_rationalizable
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.positiveCycle_iff_garpViolation_dataset
@@ -3026,6 +3209,7 @@ def rationalityTest (C : FiniteDescriptiveCore) (data : List (Observation C)) :
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_rationalizer_iff_noPositiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_rationalizer_iff_noGARPViolation
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.rationalityTest
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.rationalityTestMinimal
 /- AXIOM_AUDIT_END -/
 
 end FiniteDescriptiveCore
