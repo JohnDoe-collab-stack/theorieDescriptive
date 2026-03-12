@@ -25,6 +25,7 @@ roots = [
   "Descriptive.FiniteTheorems",
   "Descriptive.FiniteMain",
   "Descriptive.DenotationDynamics",
+  "Descriptive.Economics",
   "Descriptive.ConcreteInstance",
   "Descriptive.ConcreteInstance2",
   "Descriptive.ConcreteInstance3",
