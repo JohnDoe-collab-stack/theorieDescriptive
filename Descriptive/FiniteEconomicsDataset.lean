@@ -2149,6 +2149,59 @@ theorem iteratePot_upperBound {α : Type} [DecidableEq α] (cs : List (Constrain
               exact hMain
 
 /-!
+### Longest-path characterization (identification)
+
+For fixed `n`, the value `(iteratePot n cs).val v` is exactly the **maximum**
+total weight among all paths ending at `v` with length ≤ `n`, and this maximum
+is *attained* by the witness path carried inside the `Pot` invariant.
+
+This makes the canonical utility values fully combinatorial: they are longest
+path values in the revealed-inequality graph (finite, bounded-length).
+-/
+
+def IsLongestPathValue {α : Type} (cs : List (Constraint α)) (n : Nat) (v : α) (m : Nat) : Prop :=
+  (∃ x : α, ∃ p : List (Constraint α),
+      PathIn cs x v p ∧ p.length ≤ n ∧ pathWeight p = m) ∧
+    (∀ (x : α) (p : List (Constraint α)),
+      PathIn cs x v p → p.length ≤ n → pathWeight p ≤ m)
+
+theorem iteratePot_isLongestPathValue {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ (n : Nat) (v : α), IsLongestPathValue cs n v ((iteratePot (α := α) n cs).val v) := by
+  intro n v
+  refine And.intro ?_ ?_
+  · -- attained by the carried witness path
+    let pot : Pot α := iteratePot (α := α) n cs
+    have hInv : PotInvariant cs pot := iteratePot_invariant (α := α) (cs := cs) n
+    have hLen : PotLenInvariant n pot := iteratePot_lenInvariant (α := α) (cs := cs) n
+    refine ⟨pot.start v, pot.path v, ?_, ?_, ?_⟩
+    · exact (hInv v).1
+    · exact hLen v
+    · exact (hInv v).2
+  · -- any bounded-length path is upper-bounded by the computed value
+    intro x p hPath hlen
+    exact iteratePot_upperBound (α := α) (cs := cs) (n := n) (v := v) (x := x) (p := p) hPath hlen
+
+theorem canonicalUtility_isLongestPathValue (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ∀ v : C.Obj,
+      IsLongestPathValue (ConstraintsOfDataset C data) C.allObjs.length v (canonicalUtility C data v) := by
+  intro v
+  have hLP :
+      IsLongestPathValue (ConstraintsOfDataset C data) C.allObjs.length v
+        ((iteratePot (α := C.Obj) C.allObjs.length (ConstraintsOfDataset C data)).val v) :=
+    iteratePot_isLongestPathValue
+      (α := C.Obj) (cs := ConstraintsOfDataset C data) C.allObjs.length v
+  have hVal :
+      (iteratePot (α := C.Obj) C.allObjs.length (ConstraintsOfDataset C data)).val v =
+        canonicalUtility C data v := by
+    dsimp [canonicalUtility, iteratePot]
+    exact
+      iterate_relaxOncePot_val_eq_iterate_relaxOnce
+        (α := C.Obj) (cs := ConstraintsOfDataset C data) C.allObjs.length v
+  -- rewrite the target value and use the longest-path characterization for `iteratePot`
+  rw [← hVal]
+  exact hLP
+
+/-!
 ### Completeness (finite): failure ⇒ positive cycle ⇒ (¬cycle ⇒ rationalizer)
 
 We now close the loop constructively:
@@ -3202,6 +3255,8 @@ def rationalityTestMinimal (C : FiniteDescriptiveCore) (data : List (Observation
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.garpViolation_implies_not_rationalizable
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.satisfiableConstraints_implies_noPositiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.iteratePot_upperBound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.iteratePot_isLongestPathValue
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.canonicalUtility_isLongestPathValue
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.strictImprove_iteratePot_implies_positiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycleCert
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycle
