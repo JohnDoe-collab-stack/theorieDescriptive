@@ -739,6 +739,240 @@ theorem solveUtility_sound (C : FiniteDescriptiveCore) (data : List (Observation
         )
       exact (rationalizesDataset_iff_satisfiesConstraints (C := C) (u := uCand) (data := data)).2 hProp
 
+/-!
+### Informative failure: an explicit violated constraint
+
+`solveUtility` currently returns `none` on failure. For economics/debugging it is
+often better to expose *which* revealed inequality fails for the candidate `u`.
+The following API returns either a rationalizing `u`, or a concrete violated
+constraint `c`.
+-/
+
+theorem decide_eq_false_iff (p : Prop) (dp : Decidable p) : @decide p dp = false ↔ ¬ p := by
+  cases dp with
+  | isTrue hp =>
+      constructor
+      · intro h
+        cases h
+      · intro hnp
+        cases (hnp hp)
+  | isFalse hnp =>
+      constructor
+      · intro _
+        exact hnp
+      · intro _
+        rfl
+
+def findFirstViolation {α : Type} (u : α → Nat) : List (Constraint α) → Option (Constraint α)
+  | [] => none
+  | c :: cs =>
+      if decide (SatisfiesConstraint u c) then
+        findFirstViolation u cs
+      else
+        some c
+
+theorem findFirstViolation_sound {α : Type} (u : α → Nat) :
+    ∀ (cs : List (Constraint α)) (c : Constraint α),
+      findFirstViolation u cs = some c → c ∈ cs ∧ ¬ SatisfiesConstraint u c := by
+  intro cs
+  induction cs with
+  | nil =>
+      intro c h
+      cases h
+  | cons c0 cs ih =>
+      intro c h
+      dsimp [findFirstViolation] at h
+      by_cases hSat : SatisfiesConstraint u c0
+      · have hdec : decide (SatisfiesConstraint u c0) = true :=
+          (FiniteDemand.decide_eq_true_iff (p := SatisfiesConstraint u c0) (dp := inferInstance)).2 hSat
+        rw [hdec] at h
+        have h' := ih c h
+        exact ⟨List.Mem.tail c0 h'.1, h'.2⟩
+      · have hdec : decide (SatisfiesConstraint u c0) = false :=
+          (decide_eq_false_iff (p := SatisfiesConstraint u c0) (dp := inferInstance)).2 hSat
+        rw [hdec] at h
+        cases h
+        exact ⟨List.Mem.head cs, hSat⟩
+
+theorem findFirstViolation_none_implies_satisfiesConstraints {α : Type} (u : α → Nat) :
+    ∀ (cs : List (Constraint α)),
+      findFirstViolation u cs = none → SatisfiesConstraints u cs := by
+  intro cs
+  induction cs with
+  | nil =>
+      intro _ c hc
+      cases hc
+  | cons c0 cs ih =>
+      intro hNone c hc
+      dsimp [findFirstViolation] at hNone
+      by_cases hSat : SatisfiesConstraint u c0
+      · have hdec : decide (SatisfiesConstraint u c0) = true :=
+          (FiniteDemand.decide_eq_true_iff (p := SatisfiesConstraint u c0) (dp := inferInstance)).2 hSat
+        rw [hdec] at hNone
+        have hTail : SatisfiesConstraints u cs := ih hNone
+        cases hc with
+        | head => exact hSat
+        | tail _ hcTail => exact hTail c hcTail
+      · have hdec : decide (SatisfiesConstraint u c0) = false :=
+          (decide_eq_false_iff (p := SatisfiesConstraint u c0) (dp := inferInstance)).2 hSat
+        rw [hdec] at hNone
+        cases hNone
+
+inductive SolveResult (α : Type) where
+  | success : (α → Nat) → SolveResult α
+  | fail : (α → Nat) → Constraint α → SolveResult α
+
+def solveUtilityResult (C : FiniteDescriptiveCore) (data : List (Observation C)) : SolveResult C.Obj :=
+  let cs := ConstraintsOfDataset C data
+  let u0 : C.Obj → Nat := fun _ => 0
+  let u := iterate C.allObjs.length (relaxOnce cs) u0
+  match findFirstViolation u cs with
+  | none => SolveResult.success u
+  | some c => SolveResult.fail u c
+
+theorem solveUtilityResult_success_sound (C : FiniteDescriptiveCore) (data : List (Observation C))
+    {u : C.Obj → Nat} :
+    solveUtilityResult C data = SolveResult.success u → RationalizesDataset C u data := by
+  intro h
+  dsimp [solveUtilityResult] at h
+  -- unfold the match on `findFirstViolation`
+  cases hFind :
+      findFirstViolation
+        (iterate C.allObjs.length (relaxOnce (ConstraintsOfDataset C data)) (fun _ => 0))
+        (ConstraintsOfDataset C data) with
+  | some c =>
+      rw [hFind] at h
+      cases h
+  | none =>
+      rw [hFind] at h
+      cases h
+      let uCand : C.Obj → Nat :=
+        iterate C.allObjs.length (relaxOnce (ConstraintsOfDataset C data)) (fun _ => 0)
+      have hSat : SatisfiesConstraints uCand (ConstraintsOfDataset C data) := by
+        exact
+          findFirstViolation_none_implies_satisfiesConstraints
+            (u := uCand) (ConstraintsOfDataset C data) (by
+              dsimp [uCand]
+              exact hFind
+            )
+      exact (rationalizesDataset_iff_satisfiesConstraints (C := C) (u := uCand) (data := data)).2 hSat
+
+theorem solveUtilityResult_fail_sound (C : FiniteDescriptiveCore) (data : List (Observation C))
+    {u : C.Obj → Nat} {c : Constraint C.Obj} :
+    solveUtilityResult C data = SolveResult.fail u c →
+      c ∈ ConstraintsOfDataset C data ∧ ¬ SatisfiesConstraint u c := by
+  intro h
+  dsimp [solveUtilityResult] at h
+  let uCand : C.Obj → Nat :=
+    iterate C.allObjs.length (relaxOnce (ConstraintsOfDataset C data)) (fun _ => 0)
+  cases hFind : findFirstViolation uCand (ConstraintsOfDataset C data) with
+  | none =>
+      rw [hFind] at h
+      cases h
+  | some c0 =>
+      rw [hFind] at h
+      have hSound0 :=
+        findFirstViolation_sound (u := uCand) (ConstraintsOfDataset C data) c0 (by
+          dsimp [uCand] at hFind
+          exact hFind
+        )
+      cases h
+      exact hSound0
+
+/-!
+### Economic impossibility certificate: positive cycles (GARP-type)
+
+The constraints `u src + w ≤ u dst` are *revealed-inequality edges* with weight `w`.
+Any closed path whose total weight is positive forces `u x < u x`, hence makes the
+dataset **not** rationalizable. This is the constructive analogue of a revealed
+preference cycle / GARP violation (here with the deterministic tie-break encoded
+by `w = 1` edges).
+-/
+
+def pathWeight {α : Type} : List (Constraint α) → Nat
+  | [] => 0
+  | c :: cs => c.w + pathWeight cs
+
+inductive PathIn {α : Type} (cs : List (Constraint α)) : α → α → List (Constraint α) → Prop
+  | nil (x : α) : PathIn cs x x []
+  | cons {x y : α} {c : Constraint α} {p : List (Constraint α)} :
+      c ∈ cs → c.src = x → PathIn cs c.dst y p → PathIn cs x y (c :: p)
+
+theorem pathIn_sound {α : Type} (u : α → Nat) {cs : List (Constraint α)} :
+    ∀ {x y : α} {p : List (Constraint α)},
+      PathIn cs x y p → SatisfiesConstraints u cs → u x + pathWeight p ≤ u y := by
+  intro x y p hPath hSat
+  induction hPath with
+  | nil =>
+      rename_i x0
+      dsimp [pathWeight]
+      exact Nat.le_refl (u x0)
+  | cons hcMem hsrc hTail ih =>
+      rename_i x0 y0 c0 p0
+      -- Unfold the constraint satisfaction and rewrite along `c0.src = x0`.
+      have hEdge0 : u c0.src + c0.w ≤ u c0.dst := hSat c0 hcMem
+      have hEdge1 : u x0 + c0.w ≤ u c0.dst := by
+        have h' := hEdge0
+        rw [hsrc] at h'
+        exact h'
+      have h1 : (u x0 + c0.w) + pathWeight p0 ≤ (u c0.dst) + pathWeight p0 :=
+        Nat.add_le_add_right hEdge1 (pathWeight p0)
+      have h : (u x0 + c0.w) + pathWeight p0 ≤ u y0 := Nat.le_trans h1 ih
+      -- Rewrite the goal into the same normal form.
+      dsimp [pathWeight]
+      have h2 : u x0 + (c0.w + pathWeight p0) ≤ u y0 := by
+        have h' : u x0 + c0.w + pathWeight p0 ≤ u y0 := h
+        -- `u x0 + c0.w + pathWeight p0 = u x0 + (c0.w + pathWeight p0)`
+        rw [Nat.add_assoc] at h'
+        exact h'
+      exact h2
+
+def PositiveCycle {α : Type} (cs : List (Constraint α)) : Prop :=
+  ∃ x : α, ∃ p : List (Constraint α), PathIn cs x x p ∧ 0 < pathWeight p
+
+theorem positiveCycle_implies_not_satisfiable {α : Type} {cs : List (Constraint α)} :
+    PositiveCycle cs → ¬ ∃ u : α → Nat, SatisfiesConstraints u cs := by
+  intro hCycle hex
+  rcases hCycle with ⟨x, p, hPath, hPos⟩
+  rcases hex with ⟨u, hSat⟩
+  have hLe : u x + pathWeight p ≤ u x := pathIn_sound (u := u) (cs := cs) (x := x) (y := x) (p := p) hPath hSat
+  have hLt : u x < u x + pathWeight p := Nat.lt_add_of_pos_right hPos
+  exact (Nat.not_lt_of_ge hLe) hLt
+
+theorem positiveCycle_implies_not_rationalizable (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    PositiveCycle (ConstraintsOfDataset C data) → ¬ ∃ u : C.Obj → Nat, RationalizesDataset C u data := by
+  intro hCycle hex
+  rcases hex with ⟨u, hR⟩
+  have hSat : SatisfiesConstraints u (ConstraintsOfDataset C data) :=
+    (rationalizesDataset_iff_satisfiesConstraints (C := C) (u := u) (data := data)).1 hR
+  exact positiveCycle_implies_not_satisfiable (cs := ConstraintsOfDataset C data) hCycle ⟨u, hSat⟩
+
+theorem positiveCycle_implies_solveUtility_eq_none (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    PositiveCycle (ConstraintsOfDataset C data) → solveUtility C data = none := by
+  intro hCycle
+  cases hSol : solveUtility C data with
+  | none => rfl
+  | some u =>
+      have hR : RationalizesDataset C u data := solveUtility_sound (C := C) (data := data) (u := u) (by
+        simpa [hSol]
+      )
+      have : False := (positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle) ⟨u, hR⟩
+      cases this
+
+theorem positiveCycle_implies_solveUtilityResult_is_fail (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    PositiveCycle (ConstraintsOfDataset C data) →
+      ∃ u : C.Obj → Nat, ∃ c : Constraint C.Obj, solveUtilityResult C data = SolveResult.fail u c := by
+  intro hCycle
+  cases hRes : solveUtilityResult C data with
+  | success u =>
+      have hR : RationalizesDataset C u data :=
+        solveUtilityResult_success_sound (C := C) (data := data) (u := u) (by simpa [hRes])
+      have : False := (positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle) ⟨u, hR⟩
+      cases this
+  | fail u c =>
+      -- after `cases`, the goal is definitionally a reflexive equality
+      exact ⟨u, c, rfl⟩
+
 /- AXIOM_AUDIT_BEGIN -/
 /-!
 ## Axiom audit
@@ -747,6 +981,9 @@ theorem solveUtility_sound (C : FiniteDescriptiveCore) (data : List (Observation
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.rationalizesDataset_iff_satisfiesConstraints
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.satisfiesConstraints_implies_demandChoice_eq_some
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtility_sound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_success_sound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_sound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.positiveCycle_implies_not_rationalizable
 /- AXIOM_AUDIT_END -/
 
 end FiniteDescriptiveCore
