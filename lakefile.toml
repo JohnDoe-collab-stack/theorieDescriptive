@@ -26,6 +26,7 @@ roots = [
   "Descriptive.FiniteMain",
   "Descriptive.DenotationDynamics",
   "Descriptive.Economics",
+  "Descriptive.FiniteEconomics",
   "Descriptive.ConcreteInstance",
   "Descriptive.ConcreteInstance2",
   "Descriptive.ConcreteInstance3",
