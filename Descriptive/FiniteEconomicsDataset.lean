@@ -103,6 +103,33 @@ To keep the development strictly constructive, we re-prove the small fragments
 we need here.
 -/
 
+def decidableMem {α : Type} [DecidableEq α] (a : α) :
+    ∀ xs : List α, Decidable (a ∈ xs)
+  | [] =>
+      isFalse (by
+        intro ha
+        cases ha
+      )
+  | x :: xs =>
+      if hax : a = x then
+        isTrue (by
+          cases hax
+          exact List.Mem.head xs
+        )
+      else
+        match decidableMem a xs with
+        | isTrue hmem =>
+            isTrue (List.Mem.tail x hmem)
+        | isFalse hnot =>
+            isFalse (by
+              intro hmem
+              cases hmem with
+              | head =>
+                  exact hax rfl
+              | tail _ hmem' =>
+                  exact hnot hmem'
+            )
+
 theorem mem_append_left' {α : Type} :
     ∀ {a : α} {s t : List α}, a ∈ s → a ∈ s ++ t := by
   intro a s t
@@ -714,6 +741,26 @@ def incomingMax {α : Type} [DecidableEq α] (u : α → Nat) (v : α) : List (C
       else
         incomingMax u v cs
 
+theorem incomingMax_congr {α : Type} [DecidableEq α] {u u' : α → Nat} (v : α) :
+    ∀ cs : List (Constraint α),
+      (∀ x : α, u x = u' x) →
+        incomingMax u v cs = incomingMax u' v cs := by
+  intro cs hEq
+  induction cs with
+  | nil =>
+      rfl
+  | cons c cs ih =>
+      dsimp [incomingMax]
+      by_cases hdst : c.dst = v
+      · rw [if_pos hdst]
+        rw [if_pos hdst]
+        have hSrc : u c.src = u' c.src := hEq c.src
+        have hTail : incomingMax u v cs = incomingMax u' v cs := ih
+        rw [hSrc, hTail]
+      · rw [if_neg hdst]
+        rw [if_neg hdst]
+        exact ih
+
 def relaxOnce {α : Type} [DecidableEq α] (cs : List (Constraint α)) (u : α → Nat) : α → Nat :=
   fun v => Nat.max (u v) (incomingMax u v cs)
 
@@ -1137,6 +1184,32 @@ structure Pot (α : Type) where
 def PotInvariant {α : Type} (cs : List (Constraint α)) (pot : Pot α) : Prop :=
   ∀ v : α, PathIn cs (pot.start v) v (pot.path v) ∧ pathWeight (pot.path v) = pot.val v
 
+def PotLenInvariant {α : Type} (k : Nat) (pot : Pot α) : Prop :=
+  ∀ v : α, (pot.path v).length ≤ k
+
+theorem length_append' {α : Type} :
+    ∀ (as bs : List α), (as ++ bs).length = as.length + bs.length := by
+  intro as bs
+  induction as with
+  | nil =>
+      dsimp
+      rw [Nat.zero_add]
+  | cons a as ih =>
+      dsimp
+      rw [ih]
+      -- `Nat.succ (as.length + bs.length) = Nat.succ as.length + bs.length`
+      exact (Nat.succ_add _ _).symm
+
+theorem append_assoc' {α : Type} :
+    ∀ (as bs cs : List α), as ++ bs ++ cs = as ++ (bs ++ cs) := by
+  intro as bs cs
+  induction as with
+  | nil =>
+      rfl
+  | cons a as ih =>
+      dsimp
+      exact congrArg (fun t => a :: t) ih
+
 def basePot {α : Type} : Pot α :=
   { val := fun _ => 0, start := fun v => v, path := fun _ => [] }
 
@@ -1145,6 +1218,11 @@ theorem basePot_invariant {α : Type} (cs : List (Constraint α)) : PotInvariant
   refine And.intro ?_ ?_
   · exact PathIn.nil v
   · rfl
+
+theorem basePot_lenInvariant {α : Type} : PotLenInvariant 0 (basePot (α := α)) := by
+  intro v
+  dsimp [PotLenInvariant, basePot]
+  exact Nat.le_refl 0
 
 structure IncomingChoice (α : Type) where
   val : Nat
@@ -1235,20 +1313,17 @@ theorem incomingChoice_edge_none_implies_val_zero {α : Type} [DecidableEq α]
 
 def relaxOncePot {α : Type} [DecidableEq α] (cs : List (Constraint α)) (pot : Pot α) : Pot α :=
   { val := fun v =>
-      let inc := incomingChoice pot v cs
-      Nat.max (pot.val v) inc.val
+      Nat.max (pot.val v) (incomingChoice pot v cs).val
     start := fun v =>
-      let inc := incomingChoice pot v cs
-      if pot.val v ≥ inc.val then pot.start v
+      if pot.val v ≥ (incomingChoice pot v cs).val then pot.start v
       else
-        match inc.edge with
+        match (incomingChoice pot v cs).edge with
         | none => pot.start v
         | some c => pot.start c.src
     path := fun v =>
-      let inc := incomingChoice pot v cs
-      if pot.val v ≥ inc.val then pot.path v
+      if pot.val v ≥ (incomingChoice pot v cs).val then pot.path v
       else
-        match inc.edge with
+        match (incomingChoice pot v cs).edge with
         | none => pot.path v
         | some c => pot.path c.src ++ [c] }
 
@@ -1258,10 +1333,24 @@ theorem relaxOncePot_invariant {α : Type} [DecidableEq α] (cs : List (Constrai
   by_cases hkeep : pot.val v ≥ (incomingChoice pot v cs).val
   · have hv := hInv v
     refine And.intro ?_ ?_
-    · simpa [relaxOncePot, hkeep] using hv.1
-    · have hmax : Nat.max (pot.val v) (incomingChoice pot v cs).val = pot.val v :=
-        Nat.max_eq_left hkeep
-      simpa [relaxOncePot, hkeep, hmax] using hv.2
+    · dsimp [relaxOncePot]
+      rw [if_pos hkeep]
+      rw [if_pos hkeep]
+      exact hv.1
+    · dsimp [relaxOncePot]
+      rw [if_pos hkeep]
+      -- rewrite the produced value by unfolding `max`
+      change pathWeight (pot.path v) = max (pot.val v) (incomingChoice pot v cs).val
+      rw [Nat.max_def]
+      by_cases hle : pot.val v ≤ (incomingChoice pot v cs).val
+      · rw [if_pos hle]
+        have hEq : pot.val v = (incomingChoice pot v cs).val :=
+          Nat.le_antisymm hle hkeep
+        -- reduce to the original invariant
+        rw [hEq] at hv
+        exact hv.2
+      · rw [if_neg hle]
+        exact hv.2
   · have hlt : pot.val v < (incomingChoice pot v cs).val := Nat.lt_of_not_ge hkeep
     cases hEdge : (incomingChoice pot v cs).edge with
     | none =>
@@ -1283,7 +1372,8 @@ theorem relaxOncePot_invariant {α : Type} [DecidableEq α] (cs : List (Constrai
           have h0 : PathIn cs (pot.start c.src) c.dst (pot.path c.src ++ [c]) :=
             pathIn_append (cs := cs) (x := pot.start c.src) (y := c.src) (z := c.dst)
               (p := pot.path c.src) (q := [c]) hPathSrc hPathEdge
-          simpa [hDst] using h0
+          cases hDst
+          exact h0
         have hWeightNew : pathWeight (pot.path c.src ++ [c]) = pot.val c.src + c.w := by
           have hWsrc : pathWeight (pot.path c.src) = pot.val c.src := hSrcInv.2
           have hWedge : pathWeight ([c] : List (Constraint α)) = c.w := by rfl
@@ -1292,7 +1382,12 @@ theorem relaxOncePot_invariant {α : Type} [DecidableEq α] (cs : List (Constrai
             pathWeight_append (pot.path c.src) [c]
           rw [hWapp, hWsrc, hWedge]
         refine And.intro ?_ ?_
-        · simpa [relaxOncePot, hkeep, hEdge] using hPathNew
+        · dsimp [relaxOncePot]
+          rw [if_neg hkeep]
+          rw [if_neg hkeep]
+          rw [hEdge]
+          dsimp
+          exact hPathNew
         · have hmax :
               Nat.max (pot.val v) (incomingChoice pot v cs).val = (incomingChoice pot v cs).val :=
             Nat.max_eq_right (Nat.le_of_lt hlt)
@@ -1305,10 +1400,46 @@ theorem relaxOncePot_invariant {α : Type} [DecidableEq α] (cs : List (Constrai
                   | none => pot.path v
                   | some c => pot.path c.src ++ [c]) =
                 pathWeight (pot.path c.src ++ [c]) := by
-                  simp [hkeep, hEdge]
+                  -- the `else` + `some c` branch is definitional here
+                  rw [if_neg hkeep]
+                  rw [hEdge]
             _ = pot.val c.src + c.w := hWeightNew
             _ = (incomingChoice pot v cs).val := hVal.symm
             _ = Nat.max (pot.val v) (incomingChoice pot v cs).val := hmax.symm
+
+theorem relaxOncePot_lenInvariant {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ {k : Nat} {pot : Pot α}, PotLenInvariant k pot → PotLenInvariant (k + 1) (relaxOncePot cs pot) := by
+  intro k pot hLen v
+  dsimp [PotLenInvariant] at hLen ⊢
+  by_cases hkeep : pot.val v ≥ (incomingChoice pot v cs).val
+  · have h0 : (pot.path v).length ≤ k := hLen v
+    have h0' : (pot.path v).length ≤ k + 1 := Nat.le_trans h0 (Nat.le_succ k)
+    dsimp [relaxOncePot]
+    rw [if_pos hkeep]
+    exact h0'
+  · cases hEdge : (incomingChoice pot v cs).edge with
+    | none =>
+        have h0 : (pot.path v).length ≤ k := hLen v
+        have h0' : (pot.path v).length ≤ k + 1 := Nat.le_trans h0 (Nat.le_succ k)
+        dsimp [relaxOncePot]
+        rw [if_neg hkeep]
+        -- match on `edge = none`
+        rw [hEdge]
+        exact h0'
+    | some c =>
+        have hSrc : (pot.path c.src).length ≤ k := hLen c.src
+        have hApp : (pot.path c.src ++ [c]).length = (pot.path c.src).length + 1 := by
+          have h := length_append' (pot.path c.src) ([c] : List (Constraint α))
+          have h1 : ([c] : List (Constraint α)).length = 1 := rfl
+          rw [h1] at h
+          exact h
+        have hBound : (pot.path c.src ++ [c]).length ≤ k + 1 := by
+          rw [hApp]
+          exact Nat.add_le_add_right hSrc 1
+        dsimp [relaxOncePot]
+        rw [if_neg hkeep]
+        rw [hEdge]
+        exact hBound
 
 theorem positiveCycle_implies_not_satisfiable {α : Type} {cs : List (Constraint α)} :
     PositiveCycle cs → ¬ ∃ u : α → Nat, SatisfiesConstraints u cs := by
@@ -1346,9 +1477,8 @@ theorem positiveCycle_implies_solveUtility_eq_none (C : FiniteDescriptiveCore) (
   cases hSol : solveUtility C data with
   | none => rfl
   | some u =>
-      have hR : RationalizesDataset C u data := solveUtility_sound (C := C) (data := data) (u := u) (by
-        simpa [hSol]
-      )
+      have hR : RationalizesDataset C u data :=
+        solveUtility_sound (C := C) (data := data) (u := u) hSol
       have : False := (positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle) ⟨u, hR⟩
       cases this
 
@@ -1359,7 +1489,7 @@ theorem positiveCycle_implies_solveUtilityResult_is_fail (C : FiniteDescriptiveC
   cases hRes : solveUtilityResult C data with
   | success u =>
       have hR : RationalizesDataset C u data :=
-        solveUtilityResult_success_sound (C := C) (data := data) (u := u) (by simpa [hRes])
+        solveUtilityResult_success_sound (C := C) (data := data) (u := u) hRes
       have : False := (positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle) ⟨u, hR⟩
       cases this
   | fail u c =>
@@ -1393,6 +1523,1350 @@ theorem exists_rationalizer_implies_noPositiveCycle (C : FiniteDescriptiveCore) 
     positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle
   exact this hex
 
+/-!
+### Completeness (finite): failure ⇒ positive cycle ⇒ (¬cycle ⇒ rationalizer)
+
+The solver `solveUtilityResult` computes the `n`-step relaxation (with
+`n = C.allObjs.length`). If the resulting candidate violates a revealed
+inequality, then there must exist a **positive cycle** among the constraints.
+
+This is a constructive Bellman–Ford-style certificate: *strict improvement
+after `n` rounds implies a cycle, and the cycle cannot have weight 0 because
+it would yield an equally good shorter path*, contradicting maximality at step
+`n`.
+-/
+
+theorem le_max_left' (a b : Nat) : a ≤ Nat.max a b := by
+  change a ≤ max a b
+  rw [Nat.max_def]
+  by_cases h : a ≤ b
+  · rw [if_pos h]
+    exact h
+  · rw [if_neg h]
+    exact Nat.le_refl a
+
+theorem le_max_right' (a b : Nat) : b ≤ Nat.max a b := by
+  change b ≤ max a b
+  rw [Nat.max_def]
+  by_cases h : a ≤ b
+  · rw [if_pos h]
+    exact Nat.le_refl b
+  · rw [if_neg h]
+    have hba : b ≤ a := Nat.le_of_lt (Nat.lt_of_not_ge h)
+    exact hba
+
+def takeN {α : Type} : Nat → List α → List α
+  | 0, _ => []
+  | Nat.succ _, [] => []
+  | Nat.succ n, x :: xs => x :: takeN n xs
+
+def dropN {α : Type} : Nat → List α → List α
+  | 0, xs => xs
+  | Nat.succ _, [] => []
+  | Nat.succ n, _ :: xs => dropN n xs
+
+theorem takeN_dropN_eq {α : Type} :
+    ∀ (n : Nat) (xs : List α), takeN n xs ++ dropN n xs = xs := by
+  intro n xs
+  induction n generalizing xs with
+  | zero =>
+      rfl
+  | succ n ih =>
+      cases xs with
+      | nil =>
+          rfl
+      | cons x xs =>
+          dsimp [takeN, dropN]
+          -- `(x :: a) ++ b = x :: (a ++ b)` by definition
+          change x :: (takeN n xs ++ dropN n xs) = x :: xs
+          exact congrArg (fun t => x :: t) (ih xs)
+
+def verticesOfPath {α : Type} (s : α) : List (Constraint α) → List α
+  | [] => [s]
+  | c :: cs => s :: verticesOfPath c.dst cs
+
+theorem verticesOfPath_length {α : Type} (s : α) :
+    ∀ (p : List (Constraint α)), (verticesOfPath s p).length = p.length + 1 := by
+  intro p
+  induction p generalizing s with
+  | nil =>
+      rfl
+  | cons c ps ih =>
+      dsimp [verticesOfPath]
+      -- `length (s :: verticesOfPath c.dst ps) = succ (ps.length + 1)`
+      rw [ih (s := c.dst)]
+
+def nthOr {α : Type} (d : α) : List α → Nat → α
+  | [], _ => d
+  | x :: _, 0 => x
+  | _ :: xs, Nat.succ n => nthOr d xs n
+
+theorem nthOr_append_length {α : Type} (d : α) :
+    ∀ (pre : List α) (x : α) (rest : List α),
+      nthOr d (pre ++ x :: rest) pre.length = x := by
+  intro pre x rest
+  induction pre with
+  | nil =>
+      rfl
+  | cons a as ih =>
+      dsimp [List.length]
+      dsimp [nthOr]
+      exact ih
+
+def vertexAt {α : Type} (s : α) : List (Constraint α) → Nat → α
+  | [], _ => s
+  | _ :: _, 0 => s
+  | c :: cs, Nat.succ n => vertexAt c.dst cs n
+
+theorem nthOr_eq_of_lt {α : Type} :
+    ∀ (xs : List α) (n : Nat) (d1 d2 : α),
+      n < xs.length → nthOr d1 xs n = nthOr d2 xs n := by
+  intro xs n d1 d2 hlt
+  induction xs generalizing n with
+  | nil =>
+      dsimp [List.length] at hlt
+      cases hlt
+  | cons x xs ih =>
+      cases n with
+      | zero =>
+          rfl
+      | succ n =>
+          dsimp [List.length] at hlt
+          have hlt' : n < xs.length := Nat.lt_of_succ_lt_succ hlt
+          dsimp [nthOr]
+          exact ih (n := n) hlt'
+
+theorem vertexAt_eq_nthOr_verticesOfPath_of_le {α : Type} (s : α) :
+    ∀ (p : List (Constraint α)) (n : Nat),
+      n ≤ p.length → vertexAt s p n = nthOr s (verticesOfPath s p) n := by
+  intro p n hn
+  induction p generalizing s n with
+  | nil =>
+      dsimp [List.length] at hn
+      cases n with
+      | zero => rfl
+      | succ n =>
+          cases (Nat.not_succ_le_zero n hn)
+  | cons c ps ih =>
+      cases n with
+      | zero =>
+          rfl
+      | succ n =>
+          -- reduce the bound
+          have hn' : n ≤ ps.length := Nat.le_of_succ_le_succ hn
+          -- unfold both sides
+          dsimp [vertexAt, verticesOfPath, nthOr]
+          have h0 : vertexAt c.dst ps n = nthOr c.dst (verticesOfPath c.dst ps) n :=
+            ih (s := c.dst) (n := n) hn'
+          -- defaults don't matter in-bounds
+          have hlt : n < (verticesOfPath c.dst ps).length := by
+            have : (verticesOfPath c.dst ps).length = ps.length + 1 := verticesOfPath_length (s := c.dst) ps
+            rw [this]
+            exact Nat.lt_succ_of_le hn'
+          have h1 : nthOr c.dst (verticesOfPath c.dst ps) n = nthOr s (verticesOfPath c.dst ps) n :=
+            (nthOr_eq_of_lt (xs := verticesOfPath c.dst ps) (n := n) (d1 := c.dst) (d2 := s) hlt)
+          exact Eq.trans h0 h1
+
+theorem incomingChoice_val_eq_incomingMax {α : Type} [DecidableEq α] (pot : Pot α) (v : α) :
+    ∀ (cs : List (Constraint α)), (incomingChoice pot v cs).val = incomingMax pot.val v cs := by
+  intro cs
+  induction cs with
+  | nil =>
+      rfl
+  | cons c cs ih =>
+      by_cases hdst : c.dst = v
+      · -- unfold without triggering simp-lemmas for `Nat.max` (some rely on `propext`)
+        dsimp [incomingChoice]
+        rw [if_pos hdst]
+        dsimp [incomingMax]
+        rw [if_pos hdst]
+        -- rewrite the tail choice-value using IH
+        rw [ih]
+        -- compare `if` with `Nat.max`
+        by_cases hge : pot.val c.src + c.w ≥ incomingMax pot.val v cs
+        · rw [if_pos hge]
+          dsimp
+          -- `max cand rest = cand` by unfolding `Nat.max`
+          change pot.val c.src + c.w = max (pot.val c.src + c.w) (incomingMax pot.val v cs)
+          rw [Nat.max_def]
+          -- compare `cand ≤ rest`
+          by_cases hle : (pot.val c.src + c.w) ≤ incomingMax pot.val v cs
+          · rw [if_pos hle]
+            -- `cand = rest` by antisymmetry
+            have hEq : pot.val c.src + c.w = incomingMax pot.val v cs :=
+              Nat.le_antisymm hle hge
+            rw [hEq]
+          · rw [if_neg hle]
+            -- goal is definitional after unfolding the `if`
+        · rw [if_neg hge]
+          -- in this branch, `cand ≤ rest`
+          have hle : pot.val c.src + c.w ≤ incomingMax pot.val v cs :=
+            Nat.le_of_lt (Nat.lt_of_not_ge hge)
+          change (incomingChoice pot v cs).val = max (pot.val c.src + c.w) (incomingMax pot.val v cs)
+          rw [Nat.max_def]
+          rw [if_pos hle]
+          exact ih
+      · dsimp [incomingChoice]
+        rw [if_neg hdst]
+        dsimp [incomingMax]
+        rw [if_neg hdst]
+        exact ih
+
+theorem relaxOncePot_val_eq_relaxOnce {α : Type} [DecidableEq α] (cs : List (Constraint α)) (pot : Pot α) :
+    ∀ v : α, (relaxOncePot cs pot).val v = relaxOnce cs pot.val v := by
+  intro v
+  dsimp [relaxOncePot, relaxOnce]
+  have hinc : (incomingChoice pot v cs).val = incomingMax pot.val v cs :=
+    incomingChoice_val_eq_incomingMax (pot := pot) (v := v) cs
+  rw [hinc]
+
+theorem iterate_relaxOncePot_val_eq_iterate_relaxOnce {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ n : Nat,
+      ∀ v : α,
+        (iterate n (relaxOncePot cs) (basePot (α := α))).val v =
+          iterate n (relaxOnce cs) (fun _ : α => 0) v := by
+  intro n
+  induction n with
+  | zero =>
+      intro v
+      rfl
+  | succ n ih =>
+      intro v
+      -- unfold one step of `iterate` on both sides (definitionally)
+      dsimp [iterate]
+      -- rewrite the Pot-valued relaxation to the numeric relaxation
+      rw [relaxOncePot_val_eq_relaxOnce (cs := cs)
+            (pot := Nat.rec (basePot (α := α)) (fun _ acc => relaxOncePot cs acc) n) v]
+      -- use the pointwise IH to compare the two `relaxOnce` inputs
+      let potN : Pot α :=
+        Nat.rec (basePot (α := α)) (fun _ acc => relaxOncePot cs acc) n
+      let uN : α → Nat :=
+        Nat.rec (motive := fun _ => α → Nat) (fun _ => 0) (fun _ acc => relaxOnce cs acc) n
+      have hPoint : ∀ x : α, potN.val x = uN x := by
+        intro x
+        have hx := ih x
+        dsimp [iterate] at hx
+        dsimp [potN, uN]
+        exact hx
+      dsimp [relaxOnce]
+      have hUv : potN.val v = uN v := hPoint v
+      have hInc : incomingMax potN.val v cs = incomingMax uN v cs :=
+        incomingMax_congr (v := v) (cs := cs) (u := potN.val) (u' := uN) hPoint
+      rw [hUv, hInc]
+
+theorem incomingChoice_ge_of_edge {α : Type} [DecidableEq α] (pot : Pot α) (v : α) :
+    ∀ (cs : List (Constraint α)) (c : Constraint α),
+      c ∈ cs → c.dst = v → pot.val c.src + c.w ≤ (incomingChoice pot v cs).val := by
+  intro cs
+  induction cs with
+  | nil =>
+      intro c hc
+      cases hc
+  | cons c0 cs ih =>
+      intro c hcMem hdst
+      dsimp [incomingChoice]
+      -- `rest := incomingChoice pot v cs`
+      by_cases hdst0 : c0.dst = v
+      · rw [if_pos hdst0]
+        -- consider which edge we are bounding
+        cases hcMem with
+        | head =>
+            -- `c = c0`
+            by_cases hge : pot.val c0.src + c0.w ≥ (incomingChoice pot v cs).val
+            · rw [if_pos hge]
+              exact Nat.le_refl (pot.val c0.src + c0.w)
+            · rw [if_neg hge]
+              -- if we didn't pick it, then it is ≤ rest
+              exact Nat.le_of_lt (Nat.lt_of_not_ge hge)
+        | tail _ hcTail =>
+            -- bound comes from the tail, so use IH and compare with the chosen max
+            have hTail : pot.val c.src + c.w ≤ (incomingChoice pot v cs).val :=
+              ih c hcTail hdst
+            by_cases hge : pot.val c0.src + c0.w ≥ (incomingChoice pot v cs).val
+            · rw [if_pos hge]
+              -- rest ≤ cand, so tail bound ≤ cand
+              have hrestLe : (incomingChoice pot v cs).val ≤ pot.val c0.src + c0.w := hge
+              exact Nat.le_trans hTail hrestLe
+            · rw [if_neg hge]
+              -- chosen value is the rest
+              exact hTail
+      · rw [if_neg hdst0]
+        -- no change; reduce to tail
+        have hcMem' : c ∈ cs := by
+          cases hcMem with
+          | head =>
+              cases hdst0 (by simpa using hdst)
+          | tail _ hcTail =>
+              exact hcTail
+        exact ih c hcMem' hdst
+
+theorem pathIn_decompose_last {α : Type} {cs : List (Constraint α)} :
+    ∀ {x y : α} {p : List (Constraint α)},
+      PathIn cs x y p →
+        p = [] ∨ ∃ (c : Constraint α) (q : List (Constraint α)),
+          p = q ++ [c] ∧ PathIn cs x c.src q ∧ c ∈ cs ∧ c.dst = y := by
+  intro x y p hPath
+  induction hPath with
+  | nil x =>
+      exact Or.inl rfl
+  | cons hcMem hsrc hTail ih =>
+      rename_i x0 y0 c0 p0
+      cases ih with
+      | inl hp0 =>
+          -- tail is empty, so we have a singleton edge
+          have hTail0 : PathIn cs c0.dst y0 ([] : List (Constraint α)) := by
+            simpa [hp0] using hTail
+          -- `hTail0` forces `y0 = c0.dst`
+          cases hTail0 with
+          | nil _ =>
+              refine Or.inr ?_
+              refine ⟨c0, [], ?_, ?_, ?_, ?_⟩
+              · rw [hp0]
+                rfl
+              · -- `PathIn cs x0 c0.src []`
+                have : c0.src = x0 := hsrc
+                simpa [this] using (PathIn.nil x0)
+              · exact hcMem
+              · rfl
+      | inr hex =>
+          rcases hex with ⟨cLast, q, hpq, hq, hMemLast, hDstLast⟩
+          refine Or.inr ?_
+          refine ⟨cLast, (c0 :: q), ?_, ?_, ?_, ?_⟩
+          · rw [hpq]
+            rfl
+          · exact PathIn.cons hcMem hsrc hq
+          · exact hMemLast
+          · exact hDstLast
+
+def iteratePot {α : Type} [DecidableEq α] (n : Nat) (cs : List (Constraint α)) : Pot α :=
+  iterate n (relaxOncePot cs) (basePot (α := α))
+
+theorem iteratePot_invariant {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ n : Nat, PotInvariant cs (iteratePot (α := α) n cs) := by
+  intro n
+  induction n with
+  | zero =>
+      dsimp [iteratePot]
+      exact basePot_invariant (α := α) cs
+  | succ n ih =>
+      dsimp [iteratePot, iterate]
+      -- `relaxOncePot` preserves the invariant
+      exact relaxOncePot_invariant (cs := cs) _ ih
+
+theorem iteratePot_lenInvariant {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ n : Nat, PotLenInvariant n (iteratePot (α := α) n cs) := by
+  intro n
+  induction n with
+  | zero =>
+      dsimp [iteratePot]
+      exact basePot_lenInvariant (α := α)
+  | succ n ih =>
+      dsimp [iteratePot, iterate]
+      -- length invariant steps by `+1`
+      exact relaxOncePot_lenInvariant (cs := cs) (k := n) (pot := iteratePot (α := α) n cs) ih
+
+theorem length_le_zero_iff_nil' {α : Type} :
+    ∀ (xs : List α), xs.length ≤ 0 → xs = [] := by
+  intro xs h
+  cases xs with
+  | nil => rfl
+  | cons x xs =>
+      cases (Nat.not_succ_le_zero xs.length h)
+
+theorem iteratePot_upperBound {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ (n : Nat) (v x : α) (p : List (Constraint α)),
+      PathIn cs x v p → p.length ≤ n → pathWeight p ≤ (iteratePot (α := α) n cs).val v := by
+  intro n
+  induction n with
+  | zero =>
+      intro v x p hPath hlen
+      have hp : p = [] := length_le_zero_iff_nil' (xs := p) hlen
+      rw [hp]
+      dsimp [pathWeight, iteratePot]
+      exact Nat.le_refl 0
+  | succ n ih =>
+      intro v x p hPath hlen
+      -- unfold `iteratePot (n+1)`
+      dsimp [iteratePot, iterate]
+      -- let `potN` be the `n`-step potential
+      let potN : Pot α := iteratePot (α := α) n cs
+      have hInvN : PotInvariant cs potN := iteratePot_invariant (α := α) (cs := cs) n
+      have hLenN : PotLenInvariant n potN := iteratePot_lenInvariant (α := α) (cs := cs) n
+      -- work by cases on whether the path is empty
+      cases p with
+      | nil =>
+          dsimp [pathWeight]
+          -- `0 ≤ _`
+          exact Nat.zero_le _
+      | cons c0 ps =>
+          -- decompose the path at the last edge
+          have hDec := pathIn_decompose_last (cs := cs) (x := x) (y := v) (p := c0 :: ps) hPath
+          cases hDec with
+          | inl hnil =>
+              cases hnil
+          | inr hex =>
+              rcases hex with ⟨cLast, q, hpq, hq, hMemLast, hDstLast⟩
+              -- the prefix `q` has length ≤ n
+              have hlenq : q.length ≤ n := by
+                -- `length (q ++ [cLast]) = q.length + 1`
+                have hqLen :
+                    (q ++ [cLast]).length = q.length + 1 := by
+                  have h := length_append' q ([cLast] : List (Constraint α))
+                  -- `[cLast].length = 1`
+                  rw [show ([cLast] : List (Constraint α)).length = 1 from rfl] at h
+                  exact h
+                -- rewrite the bound along `hpq`
+                have hlen' : (q ++ [cLast]).length ≤ n + 1 := by
+                  have hlen0 := hlen
+                  have hEqLen : (c0 :: ps).length = (q ++ [cLast]).length := congrArg List.length hpq
+                  rw [hEqLen] at hlen0
+                  exact hlen0
+                -- now `q.length + 1 ≤ n + 1` implies `q.length ≤ n`
+                have : q.length + 1 ≤ n + 1 := by
+                  rw [hqLen] at hlen'
+                  exact hlen'
+                exact Nat.le_of_succ_le_succ this
+              -- apply IH to the prefix path `q` ending at `cLast.src`
+              have hWq : pathWeight q ≤ potN.val cLast.src := by
+                -- IH expects the `n`-step potential
+                exact ih (v := cLast.src) (x := x) (p := q) hq hlenq
+              -- extend by the last edge weight
+              have hWq' : pathWeight q + cLast.w ≤ potN.val cLast.src + cLast.w :=
+                Nat.add_le_add_right hWq cLast.w
+              -- and bound by the incoming max at `v`
+              have hInc :
+                  potN.val cLast.src + cLast.w ≤ (incomingChoice potN v cs).val := by
+                exact incomingChoice_ge_of_edge (pot := potN) (v := v) cs cLast hMemLast (by
+                  -- `cLast.dst = v`
+                  exact hDstLast
+                )
+              have hWcand : pathWeight q + cLast.w ≤ (incomingChoice potN v cs).val :=
+                Nat.le_trans hWq' hInc
+              -- the relaxed value is a max with the incoming choice
+              have hLeMax : (incomingChoice potN v cs).val ≤ Nat.max (potN.val v) (incomingChoice potN v cs).val :=
+                le_max_right' _ _
+              -- compute the path weight and finish
+              have hWeight : pathWeight (q ++ [cLast]) = pathWeight q + cLast.w := by
+                have hApp := pathWeight_append (α := α) q ([cLast] : List (Constraint α))
+                -- `pathWeight [cLast] = cLast.w`
+                have h1 : pathWeight ([cLast] : List (Constraint α)) = cLast.w := by rfl
+                rw [h1] at hApp
+                exact hApp
+              -- rewrite along `hpq` and `hWeight`
+              have hMain : pathWeight (c0 :: ps) ≤ Nat.max (potN.val v) (incomingChoice potN v cs).val := by
+                rw [hpq]
+                rw [hWeight]
+                exact Nat.le_trans hWcand hLeMax
+              -- finally, `relaxOncePot` uses this max as its value
+              dsimp [relaxOncePot]
+              exact hMain
+
+/-!
+### Completeness (finite): failure ⇒ positive cycle ⇒ (¬cycle ⇒ rationalizer)
+
+We now close the loop constructively:
+
+- if the `n`-step candidate violates some constraint, then one more relaxation
+  strictly improves some vertex value;
+- strict improvement after `n = C.allObjs.length` rounds forces a repeated
+  vertex along the witnessing longest path, hence yields a **positive cycle**
+  (weight cannot be `0`, otherwise we could delete the cycle and obtain an
+  equally good shorter path, contradicting the `n`-round upper bound);
+- therefore, `¬ PositiveCycle` implies solver success and existence of a
+  rationalizing utility, giving the clean economic statement:
+
+`(∃ u, RationalizesDataset C u data) ↔ ¬ GARPViolation (ConstraintsOfDataset C data)`.
+-/
+
+/-!
+#### Constructive list infrastructure: `dedup`, `erase1`, and pigeonhole
+-/
+
+theorem mem_split' {α : Type} :
+    ∀ {xs : List α} {a : α}, a ∈ xs → ∃ pre suf : List α, xs = pre ++ a :: suf := by
+  intro xs a ha
+  induction xs with
+  | nil =>
+      cases ha
+  | cons x xs ih =>
+      cases ha with
+      | head =>
+          refine ⟨[], xs, ?_⟩
+          rfl
+      | tail _ ha' =>
+          rcases ih ha' with ⟨pre, suf, hxs⟩
+          refine ⟨x :: pre, suf, ?_⟩
+          rw [hxs]
+          rfl
+
+def erase1 {α : Type} [DecidableEq α] (a : α) : List α → List α
+  | [] => []
+  | x :: xs => if x = a then xs else x :: erase1 a xs
+
+theorem mem_erase1_of_mem_ne {α : Type} [DecidableEq α] (a b : α) :
+    ∀ {xs : List α}, b ∈ xs → b ≠ a → b ∈ erase1 a xs := by
+  intro xs hb hne
+  induction xs with
+  | nil =>
+      cases hb
+  | cons x xs ih =>
+      dsimp [erase1]
+      by_cases hxa : x = a
+      · rw [if_pos hxa]
+        cases hb with
+        | head =>
+            cases (hne hxa)
+        | tail _ hb' =>
+            exact hb'
+      · rw [if_neg hxa]
+        cases hb with
+        | head =>
+            exact List.Mem.head (erase1 a xs)
+        | tail _ hb' =>
+            exact List.Mem.tail x (ih hb')
+
+theorem mem_of_mem_erase1 {α : Type} [DecidableEq α] (a b : α) :
+    ∀ {xs : List α}, b ∈ erase1 a xs → b ∈ xs := by
+  intro xs hb
+  induction xs with
+  | nil =>
+      dsimp [erase1] at hb
+      cases hb
+  | cons x xs ih =>
+      dsimp [erase1] at hb
+      by_cases hxa : x = a
+      · rw [if_pos hxa] at hb
+        exact List.Mem.tail x hb
+      · rw [if_neg hxa] at hb
+        cases hb with
+        | head =>
+            exact List.Mem.head xs
+        | tail _ hb' =>
+            exact List.Mem.tail x (ih hb')
+
+/-!
+`List.Nodup` is defined in Std via `Pairwise` and its convenient constructor
+lemmas use `propext`. We therefore use a small inductive variant for all
+constructive reasoning about “no duplicates”.
+-/
+
+inductive NodupI {α : Type} : List α → Prop
+  | nil : NodupI []
+  | cons {a : α} {xs : List α} : (¬ a ∈ xs) → NodupI xs → NodupI (a :: xs)
+
+theorem erase1_nodupI {α : Type} [DecidableEq α] (a : α) :
+    ∀ {xs : List α}, NodupI xs → NodupI (erase1 a xs) := by
+  intro xs hN
+  induction hN with
+  | nil =>
+      dsimp [erase1]
+      exact NodupI.nil
+  | cons hxnotin hTail ih =>
+      rename_i x xs
+      dsimp [erase1]
+      by_cases hx : x = a
+      · rw [if_pos hx]
+        exact hTail
+      · rw [if_neg hx]
+        refine NodupI.cons ?_ ih
+        intro hmem
+        have : x ∈ xs := mem_of_mem_erase1 (a := a) (b := x) hmem
+        exact hxnotin this
+
+theorem length_erase1_of_nodupI_mem {α : Type} [DecidableEq α] (a : α) :
+    ∀ {xs : List α}, NodupI xs → a ∈ xs → (erase1 a xs).length + 1 = xs.length := by
+  intro xs hN ha
+  induction hN with
+  | nil =>
+      cases ha
+  | cons hxnotin hTail ih =>
+      rename_i b xsTail
+      dsimp [erase1]
+      by_cases hb : b = a
+      · rw [if_pos hb]
+      · rw [if_neg hb]
+        cases ha with
+        | head =>
+            cases (hb rfl)
+        | tail _ haTail =>
+            have hLen : (erase1 a xsTail).length + 1 = xsTail.length := ih haTail
+            dsimp [List.length]
+            have hstep :
+                Nat.succ (erase1 a xsTail).length + 1 =
+                  Nat.succ ((erase1 a xsTail).length + 1) := by
+              rfl
+            exact Eq.trans hstep (congrArg Nat.succ hLen)
+
+def dedup {α : Type} [DecidableEq α] : List α → List α
+  | [] => []
+  | x :: xs =>
+      let ys := dedup xs
+      letI : Decidable (x ∈ ys) := decidableMem x ys
+      if h : x ∈ ys then ys else x :: ys
+
+theorem mem_dedup_of_mem {α : Type} [DecidableEq α] :
+    ∀ {xs : List α} {a : α}, a ∈ xs → a ∈ dedup xs := by
+  intro xs a ha
+  induction xs with
+  | nil =>
+      cases ha
+  | cons x xs ih =>
+      dsimp [dedup]
+      cases ha with
+      | head =>
+          -- `a = x`
+          -- after the `cases`, the head element is definitionaly `a`
+          letI : Decidable (a ∈ dedup xs) := decidableMem a (dedup xs)
+          by_cases ha0 : a ∈ dedup xs
+          · rw [if_pos ha0]
+            exact ha0
+          · rw [if_neg ha0]
+            exact List.Mem.head (dedup xs)
+      | tail _ ha' =>
+          have hmem : a ∈ dedup xs := ih ha'
+          letI : Decidable (x ∈ dedup xs) := decidableMem x (dedup xs)
+          by_cases hx : x ∈ dedup xs
+          · rw [if_pos hx]
+            exact hmem
+          · rw [if_neg hx]
+            exact List.Mem.tail x hmem
+
+theorem dedup_nodupI {α : Type} [DecidableEq α] :
+    ∀ xs : List α, NodupI (dedup xs) := by
+  intro xs
+  induction xs with
+  | nil =>
+      exact NodupI.nil
+  | cons x xs ih =>
+      dsimp [dedup]
+      letI : Decidable (x ∈ dedup xs) := decidableMem x (dedup xs)
+      by_cases hx : x ∈ dedup xs
+      · rw [if_pos hx]
+        exact ih
+      · rw [if_neg hx]
+        exact NodupI.cons hx ih
+
+theorem dedup_length_le {α : Type} [DecidableEq α] :
+    ∀ xs : List α, (dedup xs).length ≤ xs.length := by
+  intro xs
+  induction xs with
+  | nil =>
+      exact Nat.le_refl 0
+  | cons x xs ih =>
+      dsimp [dedup]
+      letI : Decidable (x ∈ dedup xs) := decidableMem x (dedup xs)
+      by_cases hx : x ∈ dedup xs
+      · rw [if_pos hx]
+        -- `length (dedup xs) ≤ succ (length xs)`
+        exact Nat.le_trans ih (Nat.le_succ _)
+      · rw [if_neg hx]
+        dsimp [List.length]
+        exact Nat.succ_le_succ ih
+
+theorem nodupI_length_le_of_subset {α : Type} [DecidableEq α] :
+    ∀ {xs ys : List α},
+      NodupI xs →
+      NodupI ys →
+      (∀ x : α, x ∈ xs → x ∈ ys) →
+        xs.length ≤ ys.length := by
+  intro xs ys hx hy hsub
+  induction hx generalizing ys with
+  | nil =>
+      exact Nat.zero_le _
+  | cons hxnotin hxTail ih =>
+      rename_i a xs
+      have haMem : a ∈ ys := hsub a (List.Mem.head xs)
+      let ys' : List α := erase1 a ys
+      have hy' : NodupI ys' := erase1_nodupI (a := a) hy
+      have hlen : ys'.length + 1 = ys.length :=
+        length_erase1_of_nodupI_mem (a := a) (xs := ys) hy haMem
+      have hsub' : ∀ x : α, x ∈ xs → x ∈ ys' := by
+        intro x hxmemTail
+        have hxInYs : x ∈ ys := hsub x (List.Mem.tail a hxmemTail)
+        have hxne : x ≠ a := by
+          intro hxeq
+          cases hxeq
+          exact hxnotin hxmemTail
+        exact mem_erase1_of_mem_ne (a := a) (b := x) (xs := ys) hxInYs hxne
+      have hTailLen : xs.length ≤ ys'.length := ih (ys := ys') hy' hsub'
+      have hSucc : Nat.succ xs.length ≤ Nat.succ ys'.length := Nat.succ_le_succ hTailLen
+      have hyEq : Nat.succ ys'.length = ys.length := Eq.trans rfl hlen
+      exact hyEq ▸ hSucc
+
+theorem exists_dup_decomp_of_not_nodupI {α : Type} [DecidableEq α] :
+    ∀ xs : List α, ¬ NodupI xs → ∃ a : α, ∃ pre mid suf : List α, xs = pre ++ a :: mid ++ a :: suf := by
+  intro xs hNot
+  induction xs with
+  | nil =>
+      cases (hNot NodupI.nil)
+  | cons x xs ih =>
+      letI : Decidable (x ∈ xs) := decidableMem x xs
+      by_cases hxmem : x ∈ xs
+      · rcases mem_split' (xs := xs) (a := x) hxmem with ⟨pre, suf, hxs⟩
+        refine ⟨x, [], pre, suf, ?_⟩
+        -- `x :: xs = [] ++ x :: pre ++ x :: suf`
+        rw [hxs]
+        rfl
+      · have hTailNot : ¬ NodupI xs := by
+          intro hTailN
+          have : NodupI (x :: xs) := NodupI.cons hxmem hTailN
+          exact hNot this
+        rcases ih hTailNot with ⟨a, pre, mid, suf, hxs⟩
+        refine ⟨a, x :: pre, mid, suf, ?_⟩
+        rw [hxs]
+        rfl
+
+theorem vertexAt_dropN_add {α : Type} (s : α) :
+    ∀ (p : List (Constraint α)) (i k : Nat),
+      vertexAt s p (i + k) = vertexAt (vertexAt s p i) (dropN i p) k := by
+  intro p i k
+  induction i generalizing s p with
+  | zero =>
+      -- `i = 0`
+      have h0 : vertexAt s p 0 = s := by
+        cases p <;> rfl
+      -- `dropN 0 p = p` definitionally, and `0 + k = k`
+      rw [Nat.zero_add]
+      rw [h0]
+      rfl
+  | succ i ih =>
+      cases p with
+      | nil =>
+          rfl
+      | cons c ps =>
+          dsimp [vertexAt, dropN]
+          -- reduce to IH on the tail
+          simpa [Nat.succ_add] using ih (s := c.dst) (p := ps)
+
+theorem dropN_add {α : Type} :
+    ∀ (i k : Nat) (xs : List α), dropN (i + k) xs = dropN k (dropN i xs) := by
+  intro i k xs
+  induction i generalizing xs with
+  | zero =>
+      -- `i = 0`
+      rw [Nat.zero_add]
+      rfl
+  | succ i ih =>
+      cases xs with
+      | nil =>
+          cases k with
+          | zero => rfl
+          | succ k => rfl
+      | cons x xs =>
+          dsimp [dropN]
+          simpa [Nat.succ_add] using ih (xs := xs)
+
+theorem dropN_ne_nil_of_lt_length {α : Type} :
+    ∀ (n : Nat) (xs : List α), n < xs.length → dropN n xs ≠ [] := by
+  intro n xs hlt
+  induction n generalizing xs with
+  | zero =>
+      cases xs with
+      | nil =>
+          dsimp [List.length] at hlt
+          cases hlt
+      | cons x xs =>
+          dsimp [dropN]
+          intro h
+          cases h
+  | succ n ih =>
+      cases xs with
+      | nil =>
+          dsimp [List.length] at hlt
+          cases hlt
+      | cons x xs =>
+          dsimp [dropN]
+          -- reduce the length bound to the tail
+          dsimp [List.length] at hlt
+          have hlt' : n < xs.length := Nat.lt_of_succ_lt_succ hlt
+          exact ih xs hlt'
+
+theorem pathIn_takeN' {α : Type} {cs : List (Constraint α)} :
+    ∀ {x y : α} {p : List (Constraint α)},
+      PathIn cs x y p → ∀ n : Nat, PathIn cs x (vertexAt x p n) (takeN n p) := by
+  intro x y p hPath n
+  induction n generalizing x y p with
+  | zero =>
+      cases p with
+      | nil =>
+          exact PathIn.nil x
+      | cons c ps =>
+          exact PathIn.nil x
+  | succ n ih =>
+      cases p with
+      | nil =>
+          -- `takeN (n+1) [] = []` and `vertexAt x [] (n+1) = x`
+          exact PathIn.nil x
+      | cons c ps =>
+          -- `hPath` must be a `cons`
+          cases hPath with
+          | cons hcMem hsrc hTail =>
+              dsimp [takeN, vertexAt]
+              exact PathIn.cons hcMem hsrc (ih (x := c.dst) (y := y) (p := ps) hTail)
+
+theorem pathIn_dropN' {α : Type} {cs : List (Constraint α)} :
+    ∀ {x y : α} {p : List (Constraint α)},
+      PathIn cs x y p → ∀ n : Nat, PathIn cs (vertexAt x p n) y (dropN n p) := by
+  intro x y p hPath n
+  induction n generalizing x y p with
+  | zero =>
+      cases p with
+      | nil =>
+          -- `vertexAt x [] 0 = x` and `dropN 0 [] = []`
+          simpa [dropN, vertexAt] using hPath
+      | cons c ps =>
+          -- `vertexAt x (c :: ps) 0 = x` and `dropN 0 (c :: ps) = c :: ps`
+          simpa [dropN, vertexAt] using hPath
+  | succ n ih =>
+      cases p with
+      | nil =>
+          -- `hPath` forces `y = x`
+          cases hPath with
+          | nil _ =>
+              exact PathIn.nil x
+      | cons c ps =>
+          cases hPath with
+          | cons _ _ hTail =>
+              dsimp [dropN, vertexAt]
+              exact ih (x := c.dst) (y := y) (p := ps) hTail
+
+theorem nodup_length_le_allObjs (C : FiniteDescriptiveCore) :
+    ∀ (xs : List C.Obj), NodupI xs → xs.length ≤ C.allObjs.length := by
+  intro xs hN
+  let univ : List C.Obj := dedup C.allObjs
+  have hunivN : NodupI univ := by
+    dsimp [univ]
+    exact dedup_nodupI C.allObjs
+  have hsub : ∀ x : C.Obj, x ∈ xs → x ∈ univ := by
+    intro x _hx
+    have hxAll : x ∈ C.allObjs := C.allObjs_complete x
+    dsimp [univ]
+    exact mem_dedup_of_mem (xs := C.allObjs) (a := x) hxAll
+  have hlen1 : xs.length ≤ univ.length :=
+    nodupI_length_le_of_subset (xs := xs) (ys := univ) hN hunivN hsub
+  have hlen2 : univ.length ≤ C.allObjs.length := dedup_length_le (xs := C.allObjs)
+  exact Nat.le_trans hlen1 hlen2
+
+theorem strictImprove_iteratePot_implies_positiveCycle
+    (C : FiniteDescriptiveCore) (cs : List (Constraint C.Obj)) :
+    ∀ v : C.Obj,
+      (iteratePot (α := C.Obj) (C.allObjs.length + 1) cs).val v >
+        (iteratePot (α := C.Obj) C.allObjs.length cs).val v →
+          PositiveCycle cs := by
+  intro v hlt
+  let n : Nat := C.allObjs.length
+  let potN : Pot C.Obj := iteratePot (α := C.Obj) n cs
+  let potS : Pot C.Obj := iteratePot (α := C.Obj) (n + 1) cs
+  have hInvS : PotInvariant cs potS := iteratePot_invariant (α := C.Obj) (cs := cs) (n := n + 1)
+  have hLenS : PotLenInvariant (n + 1) potS := iteratePot_lenInvariant (α := C.Obj) (cs := cs) (n := n + 1)
+  have hPathS : PathIn cs (potS.start v) v (potS.path v) := (hInvS v).1
+  have hWgtS : pathWeight (potS.path v) = potS.val v := (hInvS v).2
+  have hlen_le : (potS.path v).length ≤ n + 1 := hLenS v
+  -- the witnessing path must have length exactly `n+1` (otherwise it would be bounded at round `n`)
+  have hlen_not_le : ¬ (potS.path v).length ≤ n := by
+    intro hlen_le_n
+    have hUB :
+        pathWeight (potS.path v) ≤ (iteratePot (α := C.Obj) n cs).val v :=
+      iteratePot_upperBound (α := C.Obj) (cs := cs) (n := n) (v := v) (x := potS.start v) (p := potS.path v)
+        hPathS hlen_le_n
+    have hUB' : potS.val v ≤ potN.val v := by
+      -- rewrite the LHS along the path-weight invariant
+      rw [← hWgtS]
+      exact hUB
+    exact (Nat.not_lt_of_ge hUB') hlt
+  have hlen_gt : n < (potS.path v).length := Nat.lt_of_not_ge hlen_not_le
+  have hlen_ge : n + 1 ≤ (potS.path v).length := Nat.succ_le_of_lt hlen_gt
+  have hlen_eq : (potS.path v).length = n + 1 := Nat.le_antisymm hlen_le hlen_ge
+  -- vertices along the witness path have a repetition (pigeonhole)
+  let vs : List C.Obj := verticesOfPath (potS.start v) (potS.path v)
+  have hVsLen : vs.length = n + 2 := by
+    dsimp [vs, n]
+    have h0 := verticesOfPath_length (s := potS.start v) (potS.path v)
+    rw [hlen_eq] at h0
+    have h1 : (n + 1) + 1 = n + 2 := by
+      rfl
+    rw [h1] at h0
+    exact h0
+  have hNotNodup : ¬ NodupI vs := by
+    intro hNodup
+    have hle : vs.length ≤ n := nodup_length_le_allObjs (C := C) vs hNodup
+    -- but `n < n+2 = vs.length`
+    have hnlt : n < vs.length := by
+      rw [hVsLen]
+      -- `n < (n+1).succ`
+      exact Nat.lt_succ_of_le (Nat.le_succ n)
+    exact (Nat.not_lt_of_ge hle) hnlt
+  rcases exists_dup_decomp_of_not_nodupI (xs := vs) hNotNodup with ⟨x, pre, mid, suf, hvs⟩
+  -- indices of the two occurrences in the vertex list
+  let i : Nat := pre.length
+  let cycleLen : Nat := (x :: mid).length
+  let j : Nat := i + cycleLen
+  have hi_lt_vs : i < vs.length := by
+    dsimp [i]
+    rw [hvs]
+    -- `pre.length < pre.length + (x :: mid ++ x :: suf).length`
+    have hpos : 0 < (x :: mid ++ x :: suf).length := by
+      dsimp [List.length]
+      exact Nat.succ_pos _
+    have hlt : pre.length < pre.length + (x :: mid ++ x :: suf).length :=
+      Nat.lt_add_of_pos_right hpos
+    have hAssoc : pre ++ x :: mid ++ x :: suf = pre ++ (x :: mid ++ x :: suf) :=
+      append_assoc' pre (x :: mid) (x :: suf)
+    rw [hAssoc]
+    have hLen : (pre ++ (x :: mid ++ x :: suf)).length = pre.length + (x :: mid ++ x :: suf).length :=
+      length_append' pre (x :: mid ++ x :: suf)
+    rw [hLen]
+    exact hlt
+  have hj_lt_vs : j < vs.length := by
+    dsimp [j, i, cycleLen]
+    -- view `vs` as `(pre ++ x :: mid) ++ x :: suf`
+    have hvs' : vs = (pre ++ x :: mid) ++ x :: suf := by
+      -- `pre ++ x :: mid ++ x :: suf` associates to the left
+      -- and `(pre ++ x :: mid) ++ x :: suf` is definitionally `pre ++ x :: (mid ++ x :: suf)`
+      exact hvs
+    rw [hvs']
+    -- show `length (pre ++ x :: mid) < length ((pre ++ x :: mid) ++ x :: suf)`
+    have hpos : 0 < (x :: suf).length := by
+      dsimp [List.length]
+      exact Nat.succ_pos _
+    have hlt : (pre ++ x :: mid).length < (pre ++ x :: mid).length + (x :: suf).length :=
+      Nat.lt_add_of_pos_right hpos
+    -- and the unfolded `j` is that prefix length
+    have hJL : pre.length + (mid.length + 1) = (pre ++ x :: mid).length := by
+      have hlen : (pre ++ x :: mid).length = pre.length + (x :: mid).length :=
+        length_append' pre (x :: mid)
+      have hxlen : (x :: mid).length = mid.length + 1 := by
+        rfl
+      calc
+        pre.length + (mid.length + 1) = pre.length + (x :: mid).length := by
+          rw [← hxlen]
+        _ = (pre ++ x :: mid).length := by
+          exact hlen.symm
+    rw [hJL]
+    have hLen : ((pre ++ x :: mid) ++ x :: suf).length = (pre ++ x :: mid).length + (x :: suf).length :=
+      length_append' (pre ++ x :: mid) (x :: suf)
+    rw [hLen]
+    exact hlt
+  have hi_le_p : i ≤ (potS.path v).length := by
+    have : i < (potS.path v).length + 1 := by
+      -- `vs.length = path.length + 1`
+      have hvLen : vs.length = (potS.path v).length + 1 := verticesOfPath_length (s := potS.start v) (potS.path v)
+      -- transport `i < vs.length`
+      have h := hi_lt_vs
+      rw [hvLen] at h
+      exact h
+    exact (Nat.lt_succ_iff).1 this
+  have hj_le_p : j ≤ (potS.path v).length := by
+    have : j < (potS.path v).length + 1 := by
+      have hvLen : vs.length = (potS.path v).length + 1 := verticesOfPath_length (s := potS.start v) (potS.path v)
+      have h := hj_lt_vs
+      rw [hvLen] at h
+      exact h
+    exact (Nat.lt_succ_iff).1 this
+  -- identify the repeated vertex as `vertexAt` at those indices
+  have hNthI : nthOr (potS.start v) vs i = x := by
+    -- `vs = pre ++ x :: (mid ++ x :: suf)`
+    have hvs0 : vs = pre ++ x :: (mid ++ x :: suf) := by
+      have hR : pre ++ x :: mid ++ x :: suf = pre ++ x :: (mid ++ x :: suf) := by
+        exact Eq.trans (append_assoc' pre (x :: mid) (x :: suf)) rfl
+      exact Eq.trans hvs hR
+    dsimp [i]
+    rw [hvs0]
+    exact nthOr_append_length (d := potS.start v) pre x (mid ++ x :: suf)
+  have hNthJ : nthOr (potS.start v) vs j = x := by
+    -- `vs = (pre ++ x :: mid) ++ x :: suf`
+    have hvs1 : vs = (pre ++ x :: mid) ++ x :: suf := by
+      exact hvs
+    rw [hvs1]
+    have hjEq : j = (pre ++ x :: mid).length := by
+      dsimp [j, i, cycleLen]
+      have hlen : (pre ++ x :: mid).length = pre.length + (x :: mid).length := length_append' pre (x :: mid)
+      rw [hlen]
+      rfl
+    rw [hjEq]
+    exact nthOr_append_length (d := potS.start v) (pre ++ x :: mid) x suf
+  have hVI : vertexAt (potS.start v) (potS.path v) i = x := by
+    have hEq := vertexAt_eq_nthOr_verticesOfPath_of_le (s := potS.start v) (p := potS.path v) (n := i) hi_le_p
+    rw [hEq]
+    dsimp [vs] at hNthI
+    exact hNthI
+  have hVJ : vertexAt (potS.start v) (potS.path v) j = x := by
+    have hEq := vertexAt_eq_nthOr_verticesOfPath_of_le (s := potS.start v) (p := potS.path v) (n := j) hj_le_p
+    rw [hEq]
+    dsimp [vs] at hNthJ
+    exact hNthJ
+  -- define the cycle segment in the edge list
+  let pAll : List (Constraint C.Obj) := potS.path v
+  let pPre : List (Constraint C.Obj) := takeN i pAll
+  let pRest : List (Constraint C.Obj) := dropN i pAll
+  let pCycle : List (Constraint C.Obj) := takeN cycleLen pRest
+  let pSuf : List (Constraint C.Obj) := dropN cycleLen pRest
+  have hDecomp : pAll = pPre ++ pCycle ++ pSuf := by
+    dsimp [pPre, pRest, pCycle, pSuf]
+    have h0 : takeN i pAll ++ dropN i pAll = pAll := takeN_dropN_eq i pAll
+    have h1 :
+        takeN cycleLen (dropN i pAll) ++ dropN cycleLen (dropN i pAll) = dropN i pAll :=
+      takeN_dropN_eq cycleLen (dropN i pAll)
+    have hA :
+        pAll = takeN i pAll ++ (takeN cycleLen (dropN i pAll) ++ dropN cycleLen (dropN i pAll)) := by
+      calc
+        pAll = takeN i pAll ++ dropN i pAll := h0.symm
+        _ = takeN i pAll ++ (takeN cycleLen (dropN i pAll) ++ dropN cycleLen (dropN i pAll)) := by
+            exact congrArg (fun t => takeN i pAll ++ t) h1.symm
+    have hAssoc :
+        takeN i pAll ++ (takeN cycleLen (dropN i pAll) ++ dropN cycleLen (dropN i pAll)) =
+          takeN i pAll ++ takeN cycleLen (dropN i pAll) ++ dropN cycleLen (dropN i pAll) := by
+      exact
+        (append_assoc'
+          (takeN i pAll)
+          (takeN cycleLen (dropN i pAll))
+          (dropN cycleLen (dropN i pAll))).symm
+    exact Eq.trans hA hAssoc
+  -- show `pCycle` is a positive cycle (weight ≠ 0)
+  have hCyclePath : PathIn cs x x pCycle := by
+    -- from `PathIn` on the whole path, extract the `i`-drop and then take `cycleLen`
+    have hDrop : PathIn cs (vertexAt (potS.start v) pAll i) v (dropN i pAll) :=
+      pathIn_dropN' (cs := cs) (x := potS.start v) (y := v) (p := pAll) hPathS i
+    have hTake : PathIn cs (vertexAt (potS.start v) pAll i)
+        (vertexAt (vertexAt (potS.start v) pAll i) (dropN i pAll) cycleLen)
+        (takeN cycleLen (dropN i pAll)) :=
+      pathIn_takeN' (cs := cs) (x := vertexAt (potS.start v) pAll i) (y := v) (p := dropN i pAll) hDrop cycleLen
+    -- rewrite the start vertex into `x`
+    have hStartEq : vertexAt (potS.start v) pAll i = x := hVI
+    have hTake1 :
+        PathIn cs x
+          (vertexAt x (dropN i pAll) cycleLen)
+          (takeN cycleLen (dropN i pAll)) := by
+      have hTake' := hTake
+      rw [hStartEq] at hTake'
+      exact hTake'
+    -- relate the endpoint of the taken suffix to `vertexAt ... (i + cycleLen)`
+    have hEnd' :
+        vertexAt x (dropN i pAll) cycleLen =
+          vertexAt (potS.start v) pAll (i + cycleLen) := by
+      have h0 := vertexAt_dropN_add (s := potS.start v) (p := pAll) (i := i) (k := cycleLen)
+      have h1 :
+          vertexAt (potS.start v) pAll (i + cycleLen) =
+            vertexAt x (dropN i pAll) cycleLen := by
+        have h0' := h0
+        rw [hStartEq] at h0'
+        exact h0'
+      exact h1.symm
+    have hTake2 :
+        PathIn cs x
+          (vertexAt (potS.start v) pAll (i + cycleLen))
+          (takeN cycleLen (dropN i pAll)) := by
+      have hTake1' := hTake1
+      rw [hEnd'] at hTake1'
+      exact hTake1'
+    -- and `i + cycleLen = j`, so the endpoint is also `x`
+    have hEndEq : vertexAt (potS.start v) pAll (i + cycleLen) = x := by
+      have hJdef : j = i + cycleLen := rfl
+      rw [← hJdef]
+      exact hVJ
+    have hTake3 : PathIn cs x x (takeN cycleLen (dropN i pAll)) := by
+      have hTake2' := hTake2
+      rw [hEndEq] at hTake2'
+      exact hTake2'
+    -- finally, this edge list is exactly `pCycle`
+    have hPCycle : pCycle = takeN cycleLen (dropN i pAll) := rfl
+    rw [hPCycle]
+    exact hTake3
+  -- if the cycle weight were 0, we could delete it and obtain a shorter path with the same weight
+  have hCyclePos : 0 < pathWeight pCycle := by
+    cases hW : pathWeight pCycle with
+    | zero =>
+        -- build the shortened path
+        let pShort : List (Constraint C.Obj) := pPre ++ pSuf
+        have hShortPath : PathIn cs (potS.start v) v pShort := by
+          -- prefix to `x = vertexAt ... i`
+          have hPrePath :
+              PathIn cs (potS.start v) (vertexAt (potS.start v) pAll i) pPre :=
+            pathIn_takeN' (cs := cs) (x := potS.start v) (y := v) (p := pAll) hPathS i
+          -- suffix from `vertexAt ... j` to `v`
+          have hSufPath :
+              PathIn cs (vertexAt (potS.start v) pAll j) v (dropN j pAll) :=
+            pathIn_dropN' (cs := cs) (x := potS.start v) (y := v) (p := pAll) hPathS j
+          -- but `dropN j pAll = pSuf` by definition
+          have hDropEq : dropN j pAll = pSuf := by
+            have hj0 : j = i + cycleLen := rfl
+            dsimp [pSuf, pRest]
+            rw [hj0]
+            exact dropN_add i cycleLen pAll
+          have hMidEq : vertexAt (potS.start v) pAll i = vertexAt (potS.start v) pAll j := by
+            -- both equal to `x`
+            rw [hVI, hVJ]
+          -- rewrite intermediate vertex and suffix list, then append
+          have hSufPath' : PathIn cs (vertexAt (potS.start v) pAll i) v pSuf := by
+            -- transport start along `hMidEq` and list along `hDropEq`
+            -- (rewrite both in `hSufPath`)
+            have h1 : PathIn cs (vertexAt (potS.start v) pAll i) v (dropN j pAll) := by
+              have h1' := hSufPath
+              rw [← hMidEq] at h1'
+              exact h1'
+            have h2 := h1
+            rw [hDropEq] at h2
+            exact h2
+          exact pathIn_append (cs := cs) (x := potS.start v) (y := vertexAt (potS.start v) pAll i) (z := v)
+            (p := pPre) (q := pSuf) hPrePath hSufPath'
+        have hShortLen : pShort.length ≤ n := by
+          -- compute lengths from the decomposition and the fact `pCycle` is nonempty
+          -- use `pAll.length = n+1` and `pAll = pPre ++ pCycle ++ pSuf`
+          have hpAllLen : pAll.length = n + 1 := by
+            -- `pAll = potS.path v`
+            dsimp [pAll, n]
+            exact hlen_eq
+          have hLenDecomp :
+              pAll.length = pPre.length + pCycle.length + pSuf.length := by
+            -- rewrite along `hDecomp` and compute length of `pPre ++ pCycle ++ pSuf`
+            rw [hDecomp]
+            have hL1 : (pPre ++ pCycle).length = pPre.length + pCycle.length := length_append' pPre pCycle
+            have hL0 : (pPre ++ pCycle ++ pSuf).length = (pPre ++ pCycle).length + pSuf.length :=
+              length_append' (pPre ++ pCycle) pSuf
+            rw [hL0]
+            rw [hL1]
+          -- `pShort.length = pPre.length + pSuf.length`
+          have hShortLenEq : pShort.length = pPre.length + pSuf.length := by
+            dsimp [pShort]
+            exact length_append' pPre pSuf
+          -- show `1 ≤ pCycle.length` by nonemptiness (cycleLen > 0 and i < j ≤ pAll.length)
+          have hCycleLenPos : 0 < cycleLen := by
+            have hcl : cycleLen = Nat.succ mid.length := rfl
+            rw [hcl]
+            exact Nat.succ_pos _
+          have hij : i < j := by
+            dsimp [j]
+            exact Nat.lt_add_of_pos_right hCycleLenPos
+          have hj_le : j ≤ pAll.length := hj_le_p
+          have hi_lt : i < pAll.length := Nat.lt_of_lt_of_le hij hj_le
+          have hRestNe : pRest ≠ [] := by
+            dsimp [pRest]
+            exact dropN_ne_nil_of_lt_length i pAll (by
+              -- `i < pAll.length` is `hi_lt`
+              exact hi_lt
+            )
+          have hCycleNe : pCycle ≠ [] := by
+            -- `pRest` is nonempty, and `cycleLen = succ _`, so `takeN cycleLen pRest` is nonempty
+            cases hpr : pRest with
+            | nil =>
+                exact False.elim (hRestNe hpr)
+            | cons e es =>
+                have hcl : cycleLen = Nat.succ mid.length := rfl
+                dsimp [pCycle]
+                rw [hpr]
+                rw [hcl]
+                -- `takeN (succ _) (e :: es) = e :: _`
+                dsimp [takeN]
+                intro h
+                cases h
+          have hCycleLenPos' : 0 < pCycle.length := by
+            cases hpc : pCycle with
+            | nil =>
+                exact False.elim (hCycleNe hpc)
+            | cons e es =>
+                dsimp [List.length]
+                exact Nat.succ_pos _
+          have hone : 1 ≤ pCycle.length := Nat.succ_le_of_lt hCycleLenPos'
+          -- compare lengths via the decomposition
+          have hmid : pPre.length + 1 + pSuf.length ≤ pPre.length + pCycle.length + pSuf.length := by
+            have h0 : pPre.length + 1 ≤ pPre.length + pCycle.length :=
+              Nat.add_le_add_left hone (pPre.length)
+            exact Nat.add_le_add_right h0 (pSuf.length)
+          have hcomm : pPre.length + 1 + pSuf.length = pPre.length + pSuf.length + 1 := by
+            rw [Nat.add_assoc]
+            rw [Nat.add_comm 1 pSuf.length]
+            rw [Nat.add_assoc]
+          have hLe : pPre.length + pSuf.length + 1 ≤ pAll.length := by
+            -- rewrite RHS using `hLenDecomp`
+            have hrhs : pPre.length + pCycle.length + pSuf.length = pAll.length := by
+              rw [hLenDecomp]
+            have hmid' : pPre.length + 1 + pSuf.length ≤ pAll.length := by
+              rw [← hrhs]
+              exact hmid
+            exact le_of_eq_of_le hcomm.symm hmid'
+          have hLe' : pShort.length + 1 ≤ n + 1 := by
+            -- rewrite `pShort.length` and `pAll.length`
+            rw [hShortLenEq]
+            rw [← hpAllLen]
+            exact hLe
+          exact Nat.le_of_succ_le_succ hLe'
+        -- weight of the shortened path equals the full path weight (since `pathWeight pCycle = 0`)
+        have hShortWeight : pathWeight pShort = pathWeight pAll := by
+          -- compute weights using the decomposition and `hW`
+          have hwApp :
+              pathWeight pAll = pathWeight pPre + pathWeight pCycle + pathWeight pSuf := by
+            -- use `pathWeight_append` twice
+            rw [hDecomp]
+            have h0 : pathWeight (pPre ++ pCycle ++ pSuf) = pathWeight (pPre ++ pCycle) + pathWeight pSuf :=
+              pathWeight_append (α := C.Obj) (pPre ++ pCycle) pSuf
+            have h1 : pathWeight (pPre ++ pCycle) = pathWeight pPre + pathWeight pCycle :=
+              pathWeight_append (α := C.Obj) pPre pCycle
+            rw [h0, h1]
+          have hwShort : pathWeight pShort = pathWeight pPre + pathWeight pSuf := by
+            dsimp [pShort]
+            exact pathWeight_append (α := C.Obj) pPre pSuf
+          -- now substitute `pathWeight pCycle = 0`
+          rw [hwShort]
+          rw [hwApp]
+          rw [hW]
+          -- simplify `a + 0 + b = a + b`
+          rw [Nat.add_zero]
+        -- apply the `n`-round upper bound to the shorter path, contradicting strict improvement
+        have hUBShort :
+            pathWeight pShort ≤ (iteratePot (α := C.Obj) n cs).val v :=
+          iteratePot_upperBound (α := C.Obj) (cs := cs) (n := n) (v := v) (x := potS.start v) (p := pShort)
+            hShortPath hShortLen
+        have hUBShort' : potS.val v ≤ potN.val v := by
+          -- `pathWeight pAll = potS.val v` by invariant, and `pathWeight pShort = pathWeight pAll`
+          have : pathWeight pShort = potS.val v := by
+            rw [hShortWeight]
+            rw [hWgtS]
+          -- rewrite and apply bound
+          rw [← this]
+          exact hUBShort
+        exact False.elim ((Nat.not_lt_of_ge hUBShort') hlt)
+    | succ w =>
+        -- `0 < succ w`
+        exact Nat.succ_pos w
+  exact ⟨x, pCycle, hCyclePath, hCyclePos⟩
+
+theorem incomingMax_ge_of_edge {α : Type} [DecidableEq α] (u : α → Nat) (v : α) :
+    ∀ (cs : List (Constraint α)) (c : Constraint α),
+      c ∈ cs → c.dst = v → u c.src + c.w ≤ incomingMax u v cs := by
+  intro cs
+  induction cs with
+  | nil =>
+      intro c hc
+      cases hc
+  | cons c0 cs ih =>
+      intro c hcMem hdst
+      dsimp [incomingMax]
+      by_cases hdst0 : c0.dst = v
+      · rw [if_pos hdst0]
+        cases hcMem with
+        | head =>
+            -- `c = c0`
+            have hle : u c0.src + c0.w ≤ Nat.max (u c0.src + c0.w) (incomingMax u v cs) :=
+              le_max_left' _ _
+            exact hle
+        | tail _ hcTail =>
+            have hTail : u c.src + c.w ≤ incomingMax u v cs := ih c hcTail hdst
+            have hle : incomingMax u v cs ≤ Nat.max (u c0.src + c0.w) (incomingMax u v cs) :=
+              le_max_right' _ _
+            exact Nat.le_trans hTail hle
+      · rw [if_neg hdst0]
+        have hcMem' : c ∈ cs := by
+          cases hcMem with
+          | head =>
+              cases hdst0 hdst
+          | tail _ hcTail =>
+              exact hcTail
+        exact ih c hcMem' hdst
+
+theorem solveUtilityResult_fail_implies_positiveCycle (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ∀ {u : C.Obj → Nat} {c : Constraint C.Obj},
+      solveUtilityResult C data = SolveResult.fail u c →
+        PositiveCycle (ConstraintsOfDataset C data) := by
+  intro u c hFail
+  let cs : List (Constraint C.Obj) := ConstraintsOfDataset C data
+  have hSound := solveUtilityResult_fail_sound (C := C) (data := data) (u := u) (c := c) hFail
+  have hcMem : c ∈ cs := by
+    dsimp [cs]
+    exact hSound.1
+  have hViol : ¬ SatisfiesConstraint u c := hSound.2
+  have hlt : u c.dst < u c.src + c.w := Nat.lt_of_not_ge hViol
+  have hInc : u c.src + c.w ≤ incomingMax u c.dst cs :=
+    incomingMax_ge_of_edge (u := u) (v := c.dst) (cs := cs) (c := c) hcMem rfl
+  have hInc' : u c.dst < incomingMax u c.dst cs := Nat.lt_of_lt_of_le hlt hInc
+  -- one more relaxation strictly increases `u` at `c.dst`
+  have hNext :
+      relaxOnce cs u c.dst > u c.dst := by
+    dsimp [relaxOnce]
+    have hle : u c.dst ≤ incomingMax u c.dst cs := Nat.le_of_lt hInc'
+    -- `max (u dst) incoming = incoming`
+    have hmax : Nat.max (u c.dst) (incomingMax u c.dst cs) = incomingMax u c.dst cs :=
+      Nat.max_eq_right hle
+    rw [hmax]
+    exact hInc'
+  -- transport the strict improvement to `iteratePot` and apply the cycle-extraction theorem
+  have hIter :
+      (iteratePot (α := C.Obj) (C.allObjs.length + 1) cs).val c.dst >
+        (iteratePot (α := C.Obj) C.allObjs.length cs).val c.dst := by
+    dsimp [solveUtilityResult] at hFail
+    -- expose the computed candidate `uCand`
+    let uCand : C.Obj → Nat := iterate C.allObjs.length (relaxOnce cs) (fun _ => 0)
+    cases hFind : findFirstViolation uCand cs with
+    | none =>
+        rw [hFind] at hFail
+        cases hFail
+    | some c0 =>
+        rw [hFind] at hFail
+        cases hFail
+        -- now `u = uCand` definitionally
+        have hSucc :
+            iterate (C.allObjs.length + 1) (relaxOnce cs) (fun _ => 0) c.dst >
+              iterate C.allObjs.length (relaxOnce cs) (fun _ => 0) c.dst := by
+          dsimp [iterate]
+          -- `Nat.rec` unfolds to one `relaxOnce` application at the successor step
+          exact hNext
+        have hEqN :
+            (iteratePot (α := C.Obj) C.allObjs.length cs).val c.dst =
+              iterate C.allObjs.length (relaxOnce cs) (fun _ => 0) c.dst := by
+          dsimp [iteratePot]
+          exact
+            iterate_relaxOncePot_val_eq_iterate_relaxOnce
+              (α := C.Obj) (cs := cs) (n := C.allObjs.length) (v := c.dst)
+        have hEqS :
+            (iteratePot (α := C.Obj) (C.allObjs.length + 1) cs).val c.dst =
+              iterate (C.allObjs.length + 1) (relaxOnce cs) (fun _ => 0) c.dst := by
+          dsimp [iteratePot]
+          exact
+            iterate_relaxOncePot_val_eq_iterate_relaxOnce
+              (α := C.Obj) (cs := cs) (n := C.allObjs.length + 1) (v := c.dst)
+        have h := hSucc
+        rw [hEqS.symm] at h
+        rw [hEqN.symm] at h
+        exact h
+  -- conclude
+  exact strictImprove_iteratePot_implies_positiveCycle (C := C) (cs := cs) (v := c.dst) hIter
+
+theorem noPositiveCycle_implies_exists_rationalizer (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ¬ PositiveCycle (ConstraintsOfDataset C data) → ∃ u : C.Obj → Nat, RationalizesDataset C u data := by
+  intro hNo
+  cases hRes : solveUtilityResult C data with
+  | success u =>
+      exact ⟨u, solveUtilityResult_success_sound (C := C) (data := data) (u := u) hRes⟩
+  | fail u c =>
+      have hCycle : PositiveCycle (ConstraintsOfDataset C data) :=
+        solveUtilityResult_fail_implies_positiveCycle (C := C) (data := data) (u := u) (c := c) hRes
+      exact False.elim (hNo hCycle)
+
+theorem exists_rationalizer_iff_noPositiveCycle (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    (∃ u : C.Obj → Nat, RationalizesDataset C u data) ↔
+      ¬ PositiveCycle (ConstraintsOfDataset C data) := by
+  constructor
+  · exact exists_rationalizer_implies_noPositiveCycle (C := C) (data := data)
+  · exact noPositiveCycle_implies_exists_rationalizer (C := C) (data := data)
+
+theorem exists_rationalizer_iff_noGARPViolation (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    (∃ u : C.Obj → Nat, RationalizesDataset C u data) ↔
+      ¬ GARPViolation (ConstraintsOfDataset C data) := by
+  constructor
+  · intro h
+    intro hG
+    have hCycle : PositiveCycle (ConstraintsOfDataset C data) :=
+      (positiveCycle_iff_garpViolation_dataset (C := C) (data := data)).2 hG
+    have hNo : ¬ PositiveCycle (ConstraintsOfDataset C data) :=
+      (exists_rationalizer_implies_noPositiveCycle (C := C) (data := data)) h
+    exact hNo hCycle
+  · intro hNoG
+    have hNoCycle : ¬ PositiveCycle (ConstraintsOfDataset C data) := by
+      intro hCycle
+      have hG : GARPViolation (ConstraintsOfDataset C data) :=
+        (positiveCycle_iff_garpViolation_dataset (C := C) (data := data)).1 hCycle
+      exact hNoG hG
+    exact noPositiveCycle_implies_exists_rationalizer (C := C) (data := data) hNoCycle
+
 /- AXIOM_AUDIT_BEGIN -/
 /-!
 ## Axiom audit
@@ -1407,6 +2881,11 @@ theorem exists_rationalizer_implies_noPositiveCycle (C : FiniteDescriptiveCore) 
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.positiveCycle_iff_garpViolation_dataset
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.garpViolation_implies_not_rationalizable
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.satisfiableConstraints_implies_noPositiveCycle
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.iteratePot_upperBound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycle
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.noPositiveCycle_implies_exists_rationalizer
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_rationalizer_iff_noPositiveCycle
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_rationalizer_iff_noGARPViolation
 /- AXIOM_AUDIT_END -/
 
 end FiniteDescriptiveCore
