@@ -764,6 +764,15 @@ theorem incomingMax_congr {α : Type} [DecidableEq α] {u u' : α → Nat} (v : 
 def relaxOnce {α : Type} [DecidableEq α] (cs : List (Constraint α)) (u : α → Nat) : α → Nat :=
   fun v => max (u v) (incomingMax u v cs)
 
+theorem relaxOnce_congr {α : Type} [DecidableEq α] (cs : List (Constraint α)) {u u' : α → Nat} :
+    (∀ x : α, u x = u' x) → ∀ v : α, relaxOnce (α := α) cs u v = relaxOnce (α := α) cs u' v := by
+  intro hEq v
+  dsimp [relaxOnce]
+  have hv : u v = u' v := hEq v
+  have hinc : incomingMax u v cs = incomingMax u' v cs :=
+    incomingMax_congr (α := α) (u := u) (u' := u') v cs hEq
+  rw [hv, hinc]
+
 /-!
 ### Canonical minimal rationalizer (pointwise)
 
@@ -1163,6 +1172,10 @@ def HasStrictEdge {α : Type} (p : List (Constraint α)) : Prop :=
 def AllWeights01 {α : Type} (cs : List (Constraint α)) : Prop :=
   ∀ c : Constraint α, c ∈ cs → c.w = 0 ∨ c.w = 1
 
+def strictEdgeCount {α : Type} : List (Constraint α) → Nat
+  | [] => 0
+  | c :: cs => if c.w = 1 then strictEdgeCount cs + 1 else strictEdgeCount cs
+
 theorem constraintsOf_allWeights01 (C : FiniteDescriptiveCore) (t : Term) (y : C.Obj) :
     AllWeights01 (constraintsOf C t y) := by
   intro c hc
@@ -1212,6 +1225,53 @@ theorem PathIn.mem_cs_of_mem_path {α : Type} {cs : List (Constraint α)} :
           exact hcMem
       | tail _ hc' =>
           exact ih c hc'
+
+theorem strictEdgeCount_eq_pathWeight_of_weights01 {α : Type} :
+    ∀ {p : List (Constraint α)},
+      (∀ c : Constraint α, c ∈ p → c.w = 0 ∨ c.w = 1) →
+        strictEdgeCount (α := α) p = pathWeight p := by
+  intro p h01
+  induction p with
+  | nil =>
+      rfl
+  | cons c ps ih =>
+      have hc01 : c.w = 0 ∨ c.w = 1 := h01 c (List.Mem.head ps)
+      have h01Tail : ∀ c' : Constraint α, c' ∈ ps → c'.w = 0 ∨ c'.w = 1 := by
+        intro c' hc'
+        exact h01 c' (List.Mem.tail c hc')
+      have ih' : strictEdgeCount (α := α) ps = pathWeight ps := ih h01Tail
+      cases hc01 with
+      | inl hw0 =>
+          -- `w = 0`
+          dsimp [strictEdgeCount, pathWeight]
+          rw [hw0]
+          -- `if 0 = 1` is false, so strictEdgeCount doesn't increase
+          rw [if_neg (by
+            intro h
+            exact (Nat.noConfusion (P := False) h)
+          )]
+          -- `0 + ... = ...`
+          rw [Nat.zero_add]
+          exact ih'
+      | inr hw1 =>
+          -- `w = 1`
+          dsimp [strictEdgeCount, pathWeight]
+          rw [hw1]
+          rw [if_pos rfl]
+          -- align `+1` with the weight `1`
+          rw [ih']
+          exact Nat.add_comm (pathWeight ps) 1
+
+theorem strictEdgeCount_eq_pathWeight_of_allWeights01 {α : Type} {cs : List (Constraint α)}
+    (h01 : AllWeights01 cs) :
+    ∀ {x y : α} {p : List (Constraint α)},
+      PathIn cs x y p → strictEdgeCount (α := α) p = pathWeight p := by
+  intro x y p hPath
+  have h01p : ∀ c : Constraint α, c ∈ p → c.w = 0 ∨ c.w = 1 := by
+    intro c hcMem
+    have hcCs : c ∈ cs := PathIn.mem_cs_of_mem_path (cs := cs) hPath c hcMem
+    exact h01 c hcCs
+  exact strictEdgeCount_eq_pathWeight_of_weights01 (α := α) (p := p) h01p
 
 theorem exists_pos_weightEdge_of_pathWeight_pos {α : Type} :
     ∀ {p : List (Constraint α)}, 0 < pathWeight p → ∃ c : Constraint α, c ∈ p ∧ 0 < c.w := by
@@ -2028,6 +2088,14 @@ theorem pathIn_decompose_last {α : Type} {cs : List (Constraint α)} :
 def iteratePot {α : Type} [DecidableEq α] (n : Nat) (cs : List (Constraint α)) : Pot α :=
   iterate n (relaxOncePot cs) (basePot (α := α))
 
+theorem iteratePot_val_succ {α : Type} [DecidableEq α] (cs : List (Constraint α)) (n : Nat) :
+    ∀ v : α,
+      (iteratePot (α := α) n.succ cs).val v =
+        relaxOnce (α := α) cs (iteratePot (α := α) n cs).val v := by
+  intro v
+  dsimp [iteratePot, iterate]
+  exact relaxOncePot_val_eq_relaxOnce (cs := cs) (pot := iteratePot (α := α) n cs) v
+
 theorem iteratePot_invariant {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
     ∀ n : Nat, PotInvariant cs (iteratePot (α := α) n cs) := by
   intro n
@@ -2165,6 +2233,58 @@ def IsLongestPathValue {α : Type} (cs : List (Constraint α)) (n : Nat) (v : α
     (∀ (x : α) (p : List (Constraint α)),
       PathIn cs x v p → p.length ≤ n → pathWeight p ≤ m)
 
+def IsUnboundedLongestPathValue {α : Type} (cs : List (Constraint α)) (v : α) (m : Nat) : Prop :=
+  (∃ x : α, ∃ p : List (Constraint α), PathIn cs x v p ∧ pathWeight p = m) ∧
+    (∀ (x : α) (p : List (Constraint α)), PathIn cs x v p → pathWeight p ≤ m)
+
+def IsLongestStrictEdgeCountValue {α : Type} (cs : List (Constraint α)) (n : Nat) (v : α) (k : Nat) : Prop :=
+  (∃ x : α, ∃ p : List (Constraint α),
+      PathIn cs x v p ∧ p.length ≤ n ∧ strictEdgeCount (α := α) p = k) ∧
+    (∀ (x : α) (p : List (Constraint α)),
+      PathIn cs x v p → p.length ≤ n → strictEdgeCount (α := α) p ≤ k)
+
+def IsUnboundedLongestStrictEdgeCountValue {α : Type} (cs : List (Constraint α)) (v : α) (k : Nat) : Prop :=
+  (∃ x : α, ∃ p : List (Constraint α), PathIn cs x v p ∧ strictEdgeCount (α := α) p = k) ∧
+    (∀ (x : α) (p : List (Constraint α)), PathIn cs x v p → strictEdgeCount (α := α) p ≤ k)
+
+theorem longestPathValue_implies_longestStrictEdgeCountValue {α : Type} {cs : List (Constraint α)}
+    (h01 : AllWeights01 cs) :
+    ∀ {n : Nat} {v : α} {m : Nat},
+      IsLongestPathValue (α := α) cs n v m →
+        IsLongestStrictEdgeCountValue (α := α) cs n v m := by
+  intro n v m hLP
+  refine And.intro ?_ ?_
+  · rcases hLP.1 with ⟨x, p, hPath, hlen, hW⟩
+    have hEq : strictEdgeCount (α := α) p = pathWeight p :=
+      strictEdgeCount_eq_pathWeight_of_allWeights01 (α := α) (cs := cs) h01 hPath
+    refine ⟨x, p, hPath, hlen, ?_⟩
+    rw [hEq]
+    exact hW
+  · intro x p hPath hlen
+    have hEq : strictEdgeCount (α := α) p = pathWeight p :=
+      strictEdgeCount_eq_pathWeight_of_allWeights01 (α := α) (cs := cs) h01 hPath
+    rw [hEq]
+    exact hLP.2 x p hPath hlen
+
+theorem unboundedLongestPathValue_implies_unboundedLongestStrictEdgeCountValue {α : Type} {cs : List (Constraint α)}
+    (h01 : AllWeights01 cs) :
+    ∀ {v : α} {m : Nat},
+      IsUnboundedLongestPathValue (α := α) cs v m →
+        IsUnboundedLongestStrictEdgeCountValue (α := α) cs v m := by
+  intro v m hLP
+  refine And.intro ?_ ?_
+  · rcases hLP.1 with ⟨x, p, hPath, hW⟩
+    have hEq : strictEdgeCount (α := α) p = pathWeight p :=
+      strictEdgeCount_eq_pathWeight_of_allWeights01 (α := α) (cs := cs) h01 hPath
+    refine ⟨x, p, hPath, ?_⟩
+    rw [hEq]
+    exact hW
+  · intro x p hPath
+    have hEq : strictEdgeCount (α := α) p = pathWeight p :=
+      strictEdgeCount_eq_pathWeight_of_allWeights01 (α := α) (cs := cs) h01 hPath
+    rw [hEq]
+    exact hLP.2 x p hPath
+
 theorem iteratePot_isLongestPathValue {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
     ∀ (n : Nat) (v : α), IsLongestPathValue cs n v ((iteratePot (α := α) n cs).val v) := by
   intro n v
@@ -2200,6 +2320,39 @@ theorem canonicalUtility_isLongestPathValue (C : FiniteDescriptiveCore) (data : 
   -- rewrite the target value and use the longest-path characterization for `iteratePot`
   rw [← hVal]
   exact hLP
+
+theorem canonicalUtility_isLongestStrictEdgeCountValue (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ∀ v : C.Obj,
+      IsLongestStrictEdgeCountValue (ConstraintsOfDataset C data) C.allObjs.length v (canonicalUtility C data v) := by
+  intro v
+  have h01 : AllWeights01 (ConstraintsOfDataset C data) := ConstraintsOfDataset_allWeights01 (C := C) (data := data)
+  have hLP :
+      IsLongestPathValue (ConstraintsOfDataset C data) C.allObjs.length v (canonicalUtility C data v) :=
+    canonicalUtility_isLongestPathValue (C := C) (data := data) v
+  exact
+    longestPathValue_implies_longestStrictEdgeCountValue
+      (α := C.Obj) (cs := ConstraintsOfDataset C data) h01 (n := C.allObjs.length) (v := v) (m := canonicalUtility C data v) hLP
+
+theorem iteratePot_val_le_succ {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ (n : Nat) (v : α),
+      (iteratePot (α := α) n cs).val v ≤ (iteratePot (α := α) (n + 1) cs).val v := by
+  intro n v
+  have hn1 : n + 1 = n.succ := by
+    rfl
+  rw [hn1]
+  rw [iteratePot_val_succ (α := α) (cs := cs) (n := n) v]
+  dsimp [relaxOnce]
+  exact nat_le_max_left _ _
+
+theorem iteratePot_val_mono {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ {m n : Nat} (h : m ≤ n) (v : α),
+      (iteratePot (α := α) m cs).val v ≤ (iteratePot (α := α) n cs).val v := by
+  intro m n h v
+  induction h with
+  | refl =>
+      exact Nat.le_refl _
+  | step _ ih =>
+      exact Nat.le_trans ih (iteratePot_val_le_succ (α := α) (cs := cs) _ v)
 
 /-!
 ### Completeness (finite): failure ⇒ positive cycle ⇒ (¬cycle ⇒ rationalizer)
@@ -3062,6 +3215,149 @@ def strictImprove_iteratePot_implies_positiveCycle
         exact Nat.succ_pos w
   exact ⟨x, pCycle, hCyclePath, hCyclePos⟩
 
+theorem noPositiveCycle_implies_iteratePot_val_eq_succ
+    (C : FiniteDescriptiveCore) (cs : List (Constraint C.Obj)) :
+    ¬ PositiveCycle cs →
+    ∀ v : C.Obj,
+      (iteratePot (α := C.Obj) (C.allObjs.length + 1) cs).val v =
+        (iteratePot (α := C.Obj) C.allObjs.length cs).val v := by
+  intro hNo v
+  let n : Nat := C.allObjs.length
+  have hle :
+      (iteratePot (α := C.Obj) n cs).val v ≤ (iteratePot (α := C.Obj) (n + 1) cs).val v :=
+    iteratePot_val_le_succ (α := C.Obj) (cs := cs) n v
+  have hnotgt :
+      ¬ (iteratePot (α := C.Obj) (n + 1) cs).val v > (iteratePot (α := C.Obj) n cs).val v := by
+    intro hgt
+    have cert :=
+      strictImprove_iteratePot_implies_positiveCycle (C := C) (cs := cs) (v := v) hgt
+    exact hNo cert.toPositiveCycle
+  have hge :
+      (iteratePot (α := C.Obj) (n + 1) cs).val v ≤ (iteratePot (α := C.Obj) n cs).val v :=
+    Nat.le_of_not_gt hnotgt
+  have hEq :
+      (iteratePot (α := C.Obj) (n + 1) cs).val v = (iteratePot (α := C.Obj) n cs).val v :=
+    Nat.le_antisymm hge hle
+  dsimp [n] at hEq
+  exact hEq
+
+theorem noPositiveCycle_implies_iteratePot_val_eq_add
+    (C : FiniteDescriptiveCore) (cs : List (Constraint C.Obj)) :
+    ¬ PositiveCycle cs →
+    ∀ (k : Nat) (v : C.Obj),
+      (iteratePot (α := C.Obj) (C.allObjs.length + k) cs).val v =
+        (iteratePot (α := C.Obj) C.allObjs.length cs).val v := by
+  intro hNo k
+  let n : Nat := C.allObjs.length
+  have hBase :
+      ∀ v : C.Obj,
+        (iteratePot (α := C.Obj) (n + 1) cs).val v = (iteratePot (α := C.Obj) n cs).val v :=
+    noPositiveCycle_implies_iteratePot_val_eq_succ (C := C) (cs := cs) hNo
+  induction k with
+  | zero =>
+      intro v
+      rfl
+  | succ k ih =>
+      intro v
+      have hEqAll :
+          ∀ x : C.Obj,
+            (iteratePot (α := C.Obj) (n + k) cs).val x =
+              (iteratePot (α := C.Obj) n cs).val x := fun x => ih x
+      -- unfold one more relaxation step at `n + k`
+      rw [Nat.add_succ]
+      rw [iteratePot_val_succ (α := C.Obj) (cs := cs) (n := n + k) v]
+      -- rewrite the relaxation input using the pointwise IH
+      have hCong :
+          relaxOnce (α := C.Obj) cs (iteratePot (α := C.Obj) (n + k) cs).val v =
+            relaxOnce (α := C.Obj) cs (iteratePot (α := C.Obj) n cs).val v :=
+        relaxOnce_congr (α := C.Obj) (cs := cs) (u := (iteratePot (α := C.Obj) (n + k) cs).val)
+          (u' := (iteratePot (α := C.Obj) n cs).val) hEqAll v
+      rw [hCong]
+      -- rewrite back to the `(n+1)` iteratePot value, then use stability at round `n`
+      rw [(iteratePot_val_succ (α := C.Obj) (cs := cs) (n := n) v).symm]
+      have hBaseSucc : (iteratePot (α := C.Obj) n.succ cs).val v = (iteratePot (α := C.Obj) n cs).val v := by
+        have h0 :
+            (iteratePot (α := C.Obj) (n + 1) cs).val v =
+              (iteratePot (α := C.Obj) n cs).val v := hBase v
+        have hn1 : n.succ = n + 1 := rfl
+        rw [hn1]
+        exact h0
+      exact hBaseSucc
+
+theorem noPositiveCycle_implies_iteratePot_val_eq_of_le
+    (C : FiniteDescriptiveCore) (cs : List (Constraint C.Obj)) :
+    ¬ PositiveCycle cs →
+    ∀ {m : Nat} (hm : C.allObjs.length ≤ m) (v : C.Obj),
+      (iteratePot (α := C.Obj) m cs).val v =
+        (iteratePot (α := C.Obj) C.allObjs.length cs).val v := by
+  intro hNo m hm v
+  let n : Nat := C.allObjs.length
+  rcases Nat.le.dest hm with ⟨k, hk⟩
+  have hAdd :
+      (iteratePot (α := C.Obj) (n + k) cs).val v = (iteratePot (α := C.Obj) n cs).val v :=
+    noPositiveCycle_implies_iteratePot_val_eq_add (C := C) (cs := cs) hNo k v
+  have hEq : (iteratePot (α := C.Obj) m cs).val v = (iteratePot (α := C.Obj) n cs).val v := by
+    -- rewrite `n + k` to `m`
+    rw [hk] at hAdd
+    exact hAdd
+  dsimp [n] at hEq
+  exact hEq
+
+theorem canonicalUtility_isUnboundedLongestPathValue (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ¬ PositiveCycle (ConstraintsOfDataset C data) →
+    ∀ v : C.Obj,
+      IsUnboundedLongestPathValue (ConstraintsOfDataset C data) v (canonicalUtility C data v) := by
+  intro hNo v
+  let cs : List (Constraint C.Obj) := ConstraintsOfDataset C data
+  let n : Nat := C.allObjs.length
+  have hLP :
+      IsLongestPathValue cs n v ((iteratePot (α := C.Obj) n cs).val v) :=
+    iteratePot_isLongestPathValue (α := C.Obj) (cs := cs) n v
+  have hVal : (iteratePot (α := C.Obj) n cs).val v = canonicalUtility C data v := by
+    dsimp [canonicalUtility, iteratePot, cs, n]
+    exact
+      iterate_relaxOncePot_val_eq_iterate_relaxOnce
+        (α := C.Obj) (cs := ConstraintsOfDataset C data) C.allObjs.length v
+  -- prove the unbounded characterization for the iteratePot value, then rewrite to `canonicalUtility`
+  have hUnb :
+      IsUnboundedLongestPathValue cs v ((iteratePot (α := C.Obj) n cs).val v) := by
+    refine And.intro ?_ ?_
+    · rcases hLP.1 with ⟨x, p, hPath, _hlen, hW⟩
+      exact ⟨x, p, hPath, hW⟩
+    · intro x p hPath
+      let m : Nat := p.length
+      have hUB :
+          pathWeight p ≤ (iteratePot (α := C.Obj) m cs).val v :=
+        iteratePot_upperBound (α := C.Obj) (cs := cs) (n := m) (v := v) (x := x) (p := p) hPath (Nat.le_refl m)
+      have hLe' :
+          (iteratePot (α := C.Obj) m cs).val v ≤ (iteratePot (α := C.Obj) n cs).val v := by
+        cases Nat.le_total m n with
+        | inl hmn =>
+            exact iteratePot_val_mono (α := C.Obj) (cs := cs) (m := m) (n := n) hmn v
+        | inr hnm =>
+            have hEq :=
+              noPositiveCycle_implies_iteratePot_val_eq_of_le (C := C) (cs := cs) hNo (m := m) hnm v
+            rw [hEq]
+            exact Nat.le_refl _
+      exact Nat.le_trans hUB hLe'
+  rw [← hVal]
+  exact hUnb
+
+theorem canonicalUtility_isUnboundedLongestStrictEdgeCountValue
+    (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ¬ PositiveCycle (ConstraintsOfDataset C data) →
+    ∀ v : C.Obj,
+      IsUnboundedLongestStrictEdgeCountValue (ConstraintsOfDataset C data) v (canonicalUtility C data v) := by
+  intro hNo v
+  have h01 : AllWeights01 (ConstraintsOfDataset C data) :=
+    ConstraintsOfDataset_allWeights01 (C := C) (data := data)
+  have hLP :
+      IsUnboundedLongestPathValue (ConstraintsOfDataset C data) v (canonicalUtility C data v) :=
+    canonicalUtility_isUnboundedLongestPathValue (C := C) (data := data) hNo v
+  exact
+    unboundedLongestPathValue_implies_unboundedLongestStrictEdgeCountValue
+      (α := C.Obj) (cs := ConstraintsOfDataset C data) h01 (v := v) (m := canonicalUtility C data v) hLP
+
 theorem incomingMax_ge_of_edge {α : Type} [DecidableEq α] (u : α → Nat) (v : α) :
     ∀ (cs : List (Constraint α)) (c : Constraint α),
       c ∈ cs → c.dst = v → u c.src + c.w ≤ incomingMax u v cs := by
@@ -3257,6 +3553,9 @@ def rationalityTestMinimal (C : FiniteDescriptiveCore) (data : List (Observation
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.iteratePot_upperBound
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.iteratePot_isLongestPathValue
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.canonicalUtility_isLongestPathValue
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.canonicalUtility_isLongestStrictEdgeCountValue
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.canonicalUtility_isUnboundedLongestPathValue
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.canonicalUtility_isUnboundedLongestStrictEdgeCountValue
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.strictImprove_iteratePot_implies_positiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycleCert
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycle
