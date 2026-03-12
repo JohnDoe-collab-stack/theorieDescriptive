@@ -963,6 +963,22 @@ def PositiveCycle {α : Type} (cs : List (Constraint α)) : Prop :=
   ∃ x : α, ∃ p : List (Constraint α), PathIn cs x x p ∧ 0 < pathWeight p
 
 /-!
+`PositiveCycle` is a *proposition* (good for theorems), but for an executable
+“rationality test” we also want a *certificate object* carrying the explicit
+cycle path.
+-/
+
+structure PositiveCycleCert {α : Type} (cs : List (Constraint α)) : Type where
+  x : α
+  p : List (Constraint α)
+  path : PathIn cs x x p
+  pos : 0 < pathWeight p
+
+def PositiveCycleCert.toPositiveCycle {α : Type} {cs : List (Constraint α)} (cert : PositiveCycleCert cs) :
+    PositiveCycle cs :=
+  ⟨cert.x, cert.p, cert.path, cert.pos⟩
+
+/-!
 ### GARP-style reading (0/1 weights)
 
 In the dataset constraints produced by `constraintsOf`, weights are always `0` (weak) or `1` (strict).
@@ -2102,7 +2118,7 @@ def dedup {α : Type} [DecidableEq α] : List α → List α
   | x :: xs =>
       let ys := dedup xs
       letI : Decidable (x ∈ ys) := decidableMem x ys
-      if h : x ∈ ys then ys else x :: ys
+      if _ : x ∈ ys then ys else x :: ys
 
 theorem mem_dedup_of_mem {α : Type} [DecidableEq α] :
     ∀ {xs : List α} {a : α}, a ∈ xs → a ∈ dedup xs := by
@@ -2215,6 +2231,92 @@ theorem exists_dup_decomp_of_not_nodupI {α : Type} [DecidableEq α] :
         refine ⟨a, x :: pre, mid, suf, ?_⟩
         rw [hxs]
         rfl
+
+/-!
+For *certificate extraction* we need a Type-level duplicate decomposition (cannot
+eliminate `∃` into `Type`). We therefore compute either a `NodupI` proof or an
+explicit decomposition witnessing a duplicate.
+-/
+
+structure DupDecomp {α : Type} (xs : List α) : Type where
+  a : α
+  pre : List α
+  mid : List α
+  suf : List α
+  eq : xs = pre ++ a :: mid ++ a :: suf
+
+structure SplitAt {α : Type} (a : α) (xs : List α) : Type where
+  pre : List α
+  suf : List α
+  eq : xs = pre ++ a :: suf
+
+def splitAtFirst {α : Type} [DecidableEq α] (a : α) : (xs : List α) → Option (SplitAt a xs)
+  | [] => none
+  | x :: xs =>
+      match decEq x a with
+      | isTrue hx =>
+          some ⟨[], xs, by cases hx; rfl⟩
+      | isFalse _hx =>
+          match splitAtFirst a xs with
+          | none => none
+          | some s =>
+              some
+                ⟨x :: s.pre, s.suf, by
+                  refine Eq.trans (congrArg (fun t => x :: t) s.eq) ?_
+                  rfl⟩
+
+theorem splitAtFirst_none_implies_not_mem {α : Type} [DecidableEq α] (a : α) :
+    ∀ xs : List α, splitAtFirst (a := a) xs = none → ¬ a ∈ xs := by
+  intro xs
+  induction xs with
+  | nil =>
+      intro _ hmem
+      cases hmem
+  | cons x xs ih =>
+      intro hnone hmem
+      dsimp [splitAtFirst] at hnone
+      cases hxa : decEq x a with
+      | isTrue hx =>
+          rw [hxa] at hnone
+          cases hnone
+      | isFalse hx =>
+          rw [hxa] at hnone
+          -- membership must come from the tail
+          cases hmem with
+          | head =>
+              -- here `x = a`, contradiction with `hx`
+              cases (hx rfl)
+          | tail _ htail =>
+              -- analyze the recursive call
+              cases hSplit : splitAtFirst (a := a) xs with
+              | none =>
+                  rw [hSplit] at hnone
+                  exact ih hSplit htail
+              | some s =>
+                  rw [hSplit] at hnone
+                  cases hnone
+
+def nodupOrDupDecomp {α : Type} [DecidableEq α] : (xs : List α) → Sum (PLift (NodupI xs)) (DupDecomp xs)
+  | [] => Sum.inl ⟨NodupI.nil⟩
+  | x :: xs =>
+      letI : Decidable (x ∈ xs) := decidableMem x xs
+      match hSplit : splitAtFirst (a := x) xs with
+      | some s =>
+          -- `xs = s.pre ++ x :: s.suf`, so `x :: xs = [] ++ x :: s.pre ++ x :: s.suf`
+          Sum.inr
+            ⟨x, [], s.pre, s.suf, by
+              refine Eq.trans (congrArg (fun t => x :: t) s.eq) ?_
+              rfl⟩
+      | none =>
+          have hxnot : ¬ x ∈ xs := splitAtFirst_none_implies_not_mem (a := x) xs hSplit
+          match nodupOrDupDecomp xs with
+          | Sum.inl hN =>
+              Sum.inl ⟨NodupI.cons hxnot hN.down⟩
+          | Sum.inr d =>
+              Sum.inr
+                ⟨d.a, x :: d.pre, d.mid, d.suf, by
+                  refine Eq.trans (congrArg (fun t => x :: t) d.eq) ?_
+                  rfl⟩
 
 theorem vertexAt_dropN_add {α : Type} (s : α) :
     ∀ (p : List (Constraint α)) (i k : Nat),
@@ -2347,12 +2449,12 @@ theorem nodup_length_le_allObjs (C : FiniteDescriptiveCore) :
   have hlen2 : univ.length ≤ C.allObjs.length := dedup_length_le (xs := C.allObjs)
   exact Nat.le_trans hlen1 hlen2
 
-theorem strictImprove_iteratePot_implies_positiveCycle
+def strictImprove_iteratePot_implies_positiveCycle
     (C : FiniteDescriptiveCore) (cs : List (Constraint C.Obj)) :
     ∀ v : C.Obj,
       (iteratePot (α := C.Obj) (C.allObjs.length + 1) cs).val v >
         (iteratePot (α := C.Obj) C.allObjs.length cs).val v →
-          PositiveCycle cs := by
+          PositiveCycleCert cs := by
   intro v hlt
   let n : Nat := C.allObjs.length
   let potN : Pot C.Obj := iteratePot (α := C.Obj) n cs
@@ -2396,7 +2498,13 @@ theorem strictImprove_iteratePot_implies_positiveCycle
       -- `n < (n+1).succ`
       exact Nat.lt_succ_of_le (Nat.le_succ n)
     exact (Nat.not_lt_of_ge hle) hnlt
-  rcases exists_dup_decomp_of_not_nodupI (xs := vs) hNotNodup with ⟨x, pre, mid, suf, hvs⟩
+  have hDup : DupDecomp vs := by
+    cases hDec : nodupOrDupDecomp (xs := vs) with
+    | inl hN =>
+        exact False.elim (hNotNodup hN.down)
+    | inr d =>
+        exact d
+  rcases hDup with ⟨x, pre, mid, suf, hvs⟩
   -- indices of the two occurrences in the vertex list
   let i : Nat := pre.length
   let cycleLen : Nat := (x :: mid).length
@@ -2763,10 +2871,10 @@ theorem incomingMax_ge_of_edge {α : Type} [DecidableEq α] (u : α → Nat) (v 
               exact hcTail
         exact ih c hcMem' hdst
 
-theorem solveUtilityResult_fail_implies_positiveCycle (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+def solveUtilityResult_fail_implies_positiveCycleCert (C : FiniteDescriptiveCore) (data : List (Observation C)) :
     ∀ {u : C.Obj → Nat} {c : Constraint C.Obj},
       solveUtilityResult C data = SolveResult.fail u c →
-        PositiveCycle (ConstraintsOfDataset C data) := by
+        PositiveCycleCert (ConstraintsOfDataset C data) := by
   intro u c hFail
   let cs : List (Constraint C.Obj) := ConstraintsOfDataset C data
   have hSound := solveUtilityResult_fail_sound (C := C) (data := data) (u := u) (c := c) hFail
@@ -2830,6 +2938,15 @@ theorem solveUtilityResult_fail_implies_positiveCycle (C : FiniteDescriptiveCore
   -- conclude
   exact strictImprove_iteratePot_implies_positiveCycle (C := C) (cs := cs) (v := c.dst) hIter
 
+theorem solveUtilityResult_fail_implies_positiveCycle (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    ∀ {u : C.Obj → Nat} {c : Constraint C.Obj},
+      solveUtilityResult C data = SolveResult.fail u c →
+        PositiveCycle (ConstraintsOfDataset C data) := by
+  intro u c hFail
+  exact
+    PositiveCycleCert.toPositiveCycle
+      (solveUtilityResult_fail_implies_positiveCycleCert (C := C) (data := data) (u := u) (c := c) hFail)
+
 theorem noPositiveCycle_implies_exists_rationalizer (C : FiniteDescriptiveCore) (data : List (Observation C)) :
     ¬ PositiveCycle (ConstraintsOfDataset C data) → ∃ u : C.Obj → Nat, RationalizesDataset C u data := by
   intro hNo
@@ -2867,6 +2984,26 @@ theorem exists_rationalizer_iff_noGARPViolation (C : FiniteDescriptiveCore) (dat
       exact hNoG hG
     exact noPositiveCycle_implies_exists_rationalizer (C := C) (data := data) hNoCycle
 
+/-!
+### Executable rationality test (double certificate)
+
+Given a dataset, we can **compute** `solveUtilityResult` and then *certify*:
+
+- either a rationalizer `u` (with proof), or
+- a positive cycle certificate (explicit cycle path).
+-/
+
+abbrev RationalizerCert (C : FiniteDescriptiveCore) (data : List (Observation C)) : Type :=
+  { u : C.Obj → Nat // RationalizesDataset C u data }
+
+def rationalityTest (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    Sum (RationalizerCert C data) (PositiveCycleCert (ConstraintsOfDataset C data)) :=
+  match h : solveUtilityResult C data with
+  | SolveResult.success u =>
+      Sum.inl ⟨u, solveUtilityResult_success_sound (C := C) (data := data) (u := u) h⟩
+  | SolveResult.fail u c =>
+      Sum.inr (solveUtilityResult_fail_implies_positiveCycleCert (C := C) (data := data) (u := u) (c := c) h)
+
 /- AXIOM_AUDIT_BEGIN -/
 /-!
 ## Axiom audit
@@ -2882,10 +3019,13 @@ theorem exists_rationalizer_iff_noGARPViolation (C : FiniteDescriptiveCore) (dat
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.garpViolation_implies_not_rationalizable
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.satisfiableConstraints_implies_noPositiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.iteratePot_upperBound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.strictImprove_iteratePot_implies_positiveCycle
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycleCert
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_implies_positiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.noPositiveCycle_implies_exists_rationalizer
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_rationalizer_iff_noPositiveCycle
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_rationalizer_iff_noGARPViolation
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.rationalityTest
 /- AXIOM_AUDIT_END -/
 
 end FiniteDescriptiveCore
