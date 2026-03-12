@@ -160,6 +160,20 @@ theorem mem_map_of_mem' {α β : Type} (f : α → β) :
       | tail _ ha' =>
           exact List.Mem.tail (f x) (ih ha')
 
+theorem mem_map_elim' {α β : Type} (f : α → β) :
+    ∀ {xs : List α} {b : β}, b ∈ xs.map f → ∃ a : α, a ∈ xs ∧ f a = b := by
+  intro xs b hb
+  induction xs with
+  | nil =>
+      cases hb
+  | cons x xs ih =>
+      cases hb with
+      | head =>
+          exact ⟨x, List.Mem.head xs, rfl⟩
+      | tail _ hb' =>
+          rcases ih hb' with ⟨a, ha, hfa⟩
+          exact ⟨a, List.Mem.tail x ha, hfa⟩
+
 /-!
 ### Revealed inequalities (constraints)
 -/
@@ -898,6 +912,177 @@ inductive PathIn {α : Type} (cs : List (Constraint α)) : α → α → List (C
   | cons {x y : α} {c : Constraint α} {p : List (Constraint α)} :
       c ∈ cs → c.src = x → PathIn cs c.dst y p → PathIn cs x y (c :: p)
 
+def PositiveCycle {α : Type} (cs : List (Constraint α)) : Prop :=
+  ∃ x : α, ∃ p : List (Constraint α), PathIn cs x x p ∧ 0 < pathWeight p
+
+/-!
+### GARP-style reading (0/1 weights)
+
+In the dataset constraints produced by `constraintsOf`, weights are always `0` (weak) or `1` (strict).
+In that situation, a “positive cycle” is exactly a revealed-preference cycle with **at least one**
+strict step.
+-/
+
+def HasStrictEdge {α : Type} (p : List (Constraint α)) : Prop :=
+  ∃ c : Constraint α, c ∈ p ∧ c.w = 1
+
+def AllWeights01 {α : Type} (cs : List (Constraint α)) : Prop :=
+  ∀ c : Constraint α, c ∈ cs → c.w = 0 ∨ c.w = 1
+
+theorem constraintsOf_allWeights01 (C : FiniteDescriptiveCore) (t : Term) (y : C.Obj) :
+    AllWeights01 (constraintsOf C t y) := by
+  intro c hc
+  dsimp [constraintsOf] at hc
+  have hc' :
+      c ∈ (prefixBefore (menuList C t) y).map (fun z => (⟨z, y, 1⟩ : Constraint C.Obj)) ∨
+        c ∈ (menuList C t).map (fun z => (⟨z, y, 0⟩ : Constraint C.Obj)) :=
+    mem_append_elim'
+      (a := c)
+      (s := (prefixBefore (menuList C t) y).map (fun z => (⟨z, y, 1⟩ : Constraint C.Obj)))
+      (t := (menuList C t).map (fun z => (⟨z, y, 0⟩ : Constraint C.Obj)))
+      hc
+  cases hc' with
+  | inl hStrict =>
+      rcases mem_map_elim'
+          (f := fun z => (⟨z, y, 1⟩ : Constraint C.Obj))
+          (xs := prefixBefore (menuList C t) y)
+          (b := c) hStrict with ⟨z, hz, rfl⟩
+      exact Or.inr rfl
+  | inr hWeak =>
+      rcases mem_map_elim'
+          (f := fun z => (⟨z, y, 0⟩ : Constraint C.Obj))
+          (xs := menuList C t)
+          (b := c) hWeak with ⟨z, hz, rfl⟩
+      exact Or.inl rfl
+
+theorem ConstraintsOfDataset_allWeights01 (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    AllWeights01 (ConstraintsOfDataset C data) := by
+  intro c hc
+  dsimp [ConstraintsOfDataset] at hc
+  rcases (mem_bindList_iff (xs := data) (f := fun obs => constraintsOf C obs.t obs.y) (b := c)).1 hc with
+    ⟨obs, hObsMem, hcIn⟩
+  exact constraintsOf_allWeights01 (C := C) (t := obs.t) (y := obs.y) c hcIn
+
+theorem PathIn.mem_cs_of_mem_path {α : Type} {cs : List (Constraint α)} :
+    ∀ {x y : α} {p : List (Constraint α)},
+      PathIn cs x y p → ∀ c : Constraint α, c ∈ p → c ∈ cs := by
+  intro x y p hPath
+  induction hPath with
+  | nil =>
+      intro c hc
+      cases hc
+  | cons hcMem _ hTail ih =>
+      intro c hc
+      cases hc with
+      | head =>
+          exact hcMem
+      | tail _ hc' =>
+          exact ih c hc'
+
+theorem exists_pos_weightEdge_of_pathWeight_pos {α : Type} :
+    ∀ {p : List (Constraint α)}, 0 < pathWeight p → ∃ c : Constraint α, c ∈ p ∧ 0 < c.w := by
+  intro p hPos
+  induction p with
+  | nil =>
+      dsimp [pathWeight] at hPos
+      cases hPos
+  | cons c ps ih =>
+      cases hw : c.w with
+      | zero =>
+          have hPos' : 0 < pathWeight ps := by
+            -- `0 < 0 + pathWeight ps` reduces to `0 < pathWeight ps`
+            dsimp [pathWeight] at hPos
+            simpa [hw, Nat.zero_add] using hPos
+          rcases ih hPos' with ⟨c', hc'mem, hc'wpos⟩
+          exact ⟨c', List.Mem.tail c hc'mem, hc'wpos⟩
+      | succ w =>
+          have : 0 < c.w := by
+            rw [hw]
+            exact Nat.succ_pos w
+          exact ⟨c, List.Mem.head ps, this⟩
+
+theorem hasStrictEdge_implies_pathWeight_pos {α : Type} :
+    ∀ {p : List (Constraint α)}, HasStrictEdge p → 0 < pathWeight p := by
+  intro p hStrict
+  induction p with
+  | nil =>
+      rcases hStrict with ⟨c, hc, _⟩
+      cases hc
+  | cons c0 ps ih =>
+      rcases hStrict with ⟨c, hcMem, hw⟩
+      cases hcMem with
+      | head =>
+          -- strict edge is the head
+          dsimp [pathWeight]
+          rw [hw]
+          -- `0 < 1 + pathWeight ps`
+          rw [Nat.one_add]
+          exact Nat.succ_pos (pathWeight ps)
+      | tail _ hcMem' =>
+          have hPosTail : 0 < pathWeight ps := ih ⟨c, hcMem', hw⟩
+          have hLe : pathWeight ps ≤ c0.w + pathWeight ps := Nat.le_add_left _ _
+          exact Nat.lt_of_lt_of_le hPosTail hLe
+
+def GARPViolation {α : Type} (cs : List (Constraint α)) : Prop :=
+  ∃ x : α, ∃ p : List (Constraint α), PathIn cs x x p ∧ HasStrictEdge p
+
+theorem positiveCycle_iff_garpViolation_of_allWeights01 {α : Type} {cs : List (Constraint α)} :
+    AllWeights01 cs → (PositiveCycle cs ↔ GARPViolation cs) := by
+  intro h01
+  constructor
+  · intro hPos
+    rcases hPos with ⟨x, p, hPath, hWeightPos⟩
+    rcases exists_pos_weightEdge_of_pathWeight_pos (p := p) hWeightPos with ⟨c, hcMemP, hcWpos⟩
+    have hcMemCs : c ∈ cs := PathIn.mem_cs_of_mem_path (cs := cs) (x := x) (y := x) (p := p) hPath c hcMemP
+    have hw01 := h01 c hcMemCs
+    cases hw01 with
+    | inl hw0 =>
+        rw [hw0] at hcWpos
+        exact False.elim (Nat.not_lt_zero _ hcWpos)
+    | inr hw1 =>
+        exact ⟨x, p, hPath, ⟨c, hcMemP, hw1⟩⟩
+  · intro hG
+    rcases hG with ⟨x, p, hPath, hStrict⟩
+    exact ⟨x, p, hPath, hasStrictEdge_implies_pathWeight_pos hStrict⟩
+
+theorem pathWeight_append {α : Type} :
+    ∀ (p q : List (Constraint α)), pathWeight (p ++ q) = pathWeight p + pathWeight q := by
+  intro p q
+  induction p with
+  | nil =>
+      dsimp [pathWeight]
+      rw [Nat.zero_add]
+  | cons c ps ih =>
+      dsimp [pathWeight]
+      -- `pathWeight ((c :: ps) ++ q) = c.w + pathWeight (ps ++ q)`
+      -- and `pathWeight (c :: ps) + pathWeight q = (c.w + pathWeight ps) + pathWeight q`
+      rw [ih]
+      exact (Nat.add_assoc _ _ _).symm
+
+theorem pathIn_append {α : Type} {cs : List (Constraint α)} :
+    ∀ {x y z : α} {p q : List (Constraint α)},
+      PathIn cs x y p → PathIn cs y z q → PathIn cs x z (p ++ q) := by
+  intro x y z p q hp hq
+  induction hp with
+  | nil =>
+      -- `[] ++ q = q`
+      exact hq
+  | cons hcMem hsrc hTail ih =>
+      -- `(c :: p) ++ q = c :: (p ++ q)`
+      dsimp
+      exact PathIn.cons hcMem hsrc (ih hq)
+
+theorem positiveCycle_of_paths {α : Type} {cs : List (Constraint α)}
+    {x y : α} {p q : List (Constraint α)} :
+    PathIn cs x y p → PathIn cs y x q → 0 < pathWeight p + pathWeight q → PositiveCycle cs := by
+  intro hp hq hPos
+  refine ⟨x, p ++ q, ?_, ?_⟩
+  · exact pathIn_append (cs := cs) (x := x) (y := y) (z := x) (p := p) (q := q) hp hq
+  · have hw : pathWeight (p ++ q) = pathWeight p + pathWeight q := pathWeight_append p q
+    -- rewrite the goal along `hw`
+    rw [hw]
+    exact hPos
+
 theorem pathIn_sound {α : Type} (u : α → Nat) {cs : List (Constraint α)} :
     ∀ {x y : α} {p : List (Constraint α)},
       PathIn cs x y p → SatisfiesConstraints u cs → u x + pathWeight p ≤ u y := by
@@ -927,8 +1112,203 @@ theorem pathIn_sound {α : Type} (u : α → Nat) {cs : List (Constraint α)} :
         exact h'
       exact h2
 
-def PositiveCycle {α : Type} (cs : List (Constraint α)) : Prop :=
-  ∃ x : α, ∃ p : List (Constraint α), PathIn cs x x p ∧ 0 < pathWeight p
+theorem pathIn_singleton {α : Type} {cs : List (Constraint α)} (c : Constraint α) :
+    c ∈ cs → PathIn cs c.src c.dst [c] := by
+  intro hc
+  -- `PathIn cs c.src c.dst (c :: [])`
+  exact PathIn.cons (x := c.src) (y := c.dst) (c := c) (p := []) hc rfl (PathIn.nil c.dst)
+
+/-!
+### Longest-path witnesses (towards completeness)
+
+To prove solver completeness and extract a **positive cycle certificate** on failure,
+it is useful to carry *witness paths* alongside the propagated numeric potentials.
+
+The following (purely constructive) machinery maintains the invariant:
+
+`pot.path v` is a concrete `PathIn cs` ending at `v`, and its `pathWeight` equals `pot.val v`.
+-/
+
+structure Pot (α : Type) where
+  val : α → Nat
+  start : α → α
+  path : α → List (Constraint α)
+
+def PotInvariant {α : Type} (cs : List (Constraint α)) (pot : Pot α) : Prop :=
+  ∀ v : α, PathIn cs (pot.start v) v (pot.path v) ∧ pathWeight (pot.path v) = pot.val v
+
+def basePot {α : Type} : Pot α :=
+  { val := fun _ => 0, start := fun v => v, path := fun _ => [] }
+
+theorem basePot_invariant {α : Type} (cs : List (Constraint α)) : PotInvariant cs (basePot (α := α)) := by
+  intro v
+  refine And.intro ?_ ?_
+  · exact PathIn.nil v
+  · rfl
+
+structure IncomingChoice (α : Type) where
+  val : Nat
+  edge : Option (Constraint α)
+
+def incomingChoice {α : Type} [DecidableEq α] (pot : Pot α) (v : α) : List (Constraint α) → IncomingChoice α
+  | [] => ⟨0, none⟩
+  | c :: cs =>
+      let rest := incomingChoice pot v cs
+      if c.dst = v then
+        let candVal := pot.val c.src + c.w
+        if candVal ≥ rest.val then ⟨candVal, some c⟩ else rest
+      else
+        rest
+
+theorem incomingChoice_edge_spec {α : Type} [DecidableEq α] (pot : Pot α) (v : α) :
+    ∀ (cs : List (Constraint α)) (c : Constraint α),
+      (incomingChoice pot v cs).edge = some c →
+        c ∈ cs ∧ c.dst = v ∧ (incomingChoice pot v cs).val = pot.val c.src + c.w := by
+  intro cs
+  induction cs with
+  | nil =>
+      intro c h
+      dsimp [incomingChoice] at h
+      cases h
+  | cons c0 cs ih =>
+      intro c h
+      dsimp [incomingChoice] at h
+      by_cases hdst : c0.dst = v
+      · rw [if_pos hdst] at h
+        by_cases hge : pot.val c0.src + c0.w ≥ (incomingChoice pot v cs).val
+        · rw [if_pos hge] at h
+          -- `edge = some c0`
+          cases h
+          refine And.intro ?_ (And.intro ?_ ?_)
+          · exact List.Mem.head cs
+          · exact hdst
+          · dsimp [incomingChoice]
+            rw [if_pos hdst]
+            rw [if_pos hge]
+            -- goal is now definitional
+        · rw [if_neg hge] at h
+          have h' := ih c h
+          rcases h' with ⟨hmem, hd, hv⟩
+          refine And.intro (List.Mem.tail c0 hmem) (And.intro hd ?_)
+          dsimp [incomingChoice]
+          rw [if_pos hdst]
+          rw [if_neg hge]
+          exact hv
+      · rw [if_neg hdst] at h
+        have h' := ih c h
+        rcases h' with ⟨hmem, hd, hv⟩
+        refine And.intro (List.Mem.tail c0 hmem) (And.intro hd ?_)
+        dsimp [incomingChoice]
+        rw [if_neg hdst]
+        exact hv
+
+theorem incomingChoice_edge_none_implies_val_zero {α : Type} [DecidableEq α]
+    (pot : Pot α) (v : α) :
+    ∀ (cs : List (Constraint α)),
+      (incomingChoice pot v cs).edge = none → (incomingChoice pot v cs).val = 0 := by
+  intro cs
+  induction cs with
+  | nil =>
+      intro h
+      dsimp [incomingChoice] at h
+      cases h
+      rfl
+  | cons c0 cs ih =>
+      intro h
+      dsimp [incomingChoice] at h
+      by_cases hdst : c0.dst = v
+      · rw [if_pos hdst] at h
+        by_cases hge : pot.val c0.src + c0.w ≥ (incomingChoice pot v cs).val
+        · rw [if_pos hge] at h
+          cases h
+        · rw [if_neg hge] at h
+          have h0 := ih h
+          dsimp [incomingChoice]
+          rw [if_pos hdst]
+          rw [if_neg hge]
+          exact h0
+      · rw [if_neg hdst] at h
+        have h0 := ih h
+        dsimp [incomingChoice]
+        rw [if_neg hdst]
+        exact h0
+
+def relaxOncePot {α : Type} [DecidableEq α] (cs : List (Constraint α)) (pot : Pot α) : Pot α :=
+  { val := fun v =>
+      let inc := incomingChoice pot v cs
+      Nat.max (pot.val v) inc.val
+    start := fun v =>
+      let inc := incomingChoice pot v cs
+      if pot.val v ≥ inc.val then pot.start v
+      else
+        match inc.edge with
+        | none => pot.start v
+        | some c => pot.start c.src
+    path := fun v =>
+      let inc := incomingChoice pot v cs
+      if pot.val v ≥ inc.val then pot.path v
+      else
+        match inc.edge with
+        | none => pot.path v
+        | some c => pot.path c.src ++ [c] }
+
+theorem relaxOncePot_invariant {α : Type} [DecidableEq α] (cs : List (Constraint α)) :
+    ∀ pot : Pot α, PotInvariant cs pot → PotInvariant cs (relaxOncePot cs pot) := by
+  intro pot hInv v
+  by_cases hkeep : pot.val v ≥ (incomingChoice pot v cs).val
+  · have hv := hInv v
+    refine And.intro ?_ ?_
+    · simpa [relaxOncePot, hkeep] using hv.1
+    · have hmax : Nat.max (pot.val v) (incomingChoice pot v cs).val = pot.val v :=
+        Nat.max_eq_left hkeep
+      simpa [relaxOncePot, hkeep, hmax] using hv.2
+  · have hlt : pot.val v < (incomingChoice pot v cs).val := Nat.lt_of_not_ge hkeep
+    cases hEdge : (incomingChoice pot v cs).edge with
+    | none =>
+        have hval0 : (incomingChoice pot v cs).val = 0 :=
+          incomingChoice_edge_none_implies_val_zero (pot := pot) (v := v) (cs := cs) hEdge
+        rw [hval0] at hlt
+        exact False.elim (Nat.not_lt_zero _ hlt)
+    | some c =>
+        have hSpec :
+            c ∈ cs ∧ c.dst = v ∧ (incomingChoice pot v cs).val = pot.val c.src + c.w :=
+          incomingChoice_edge_spec (pot := pot) (v := v) cs c hEdge
+        have hMem : c ∈ cs := hSpec.1
+        have hDst : c.dst = v := hSpec.2.1
+        have hVal : (incomingChoice pot v cs).val = pot.val c.src + c.w := hSpec.2.2
+        have hSrcInv := hInv c.src
+        have hPathSrc : PathIn cs (pot.start c.src) c.src (pot.path c.src) := hSrcInv.1
+        have hPathEdge : PathIn cs c.src c.dst [c] := pathIn_singleton (cs := cs) c hMem
+        have hPathNew : PathIn cs (pot.start c.src) v (pot.path c.src ++ [c]) := by
+          have h0 : PathIn cs (pot.start c.src) c.dst (pot.path c.src ++ [c]) :=
+            pathIn_append (cs := cs) (x := pot.start c.src) (y := c.src) (z := c.dst)
+              (p := pot.path c.src) (q := [c]) hPathSrc hPathEdge
+          simpa [hDst] using h0
+        have hWeightNew : pathWeight (pot.path c.src ++ [c]) = pot.val c.src + c.w := by
+          have hWsrc : pathWeight (pot.path c.src) = pot.val c.src := hSrcInv.2
+          have hWedge : pathWeight ([c] : List (Constraint α)) = c.w := by rfl
+          have hWapp : pathWeight (pot.path c.src ++ [c]) =
+              pathWeight (pot.path c.src) + pathWeight ([c] : List (Constraint α)) :=
+            pathWeight_append (pot.path c.src) [c]
+          rw [hWapp, hWsrc, hWedge]
+        refine And.intro ?_ ?_
+        · simpa [relaxOncePot, hkeep, hEdge] using hPathNew
+        · have hmax :
+              Nat.max (pot.val v) (incomingChoice pot v cs).val = (incomingChoice pot v cs).val :=
+            Nat.max_eq_right (Nat.le_of_lt hlt)
+          -- rewrite the RHS to the improving value and finish by the concrete weight computation
+          calc
+            pathWeight
+                (if pot.val v ≥ (incomingChoice pot v cs).val then pot.path v
+                else
+                  match (incomingChoice pot v cs).edge with
+                  | none => pot.path v
+                  | some c => pot.path c.src ++ [c]) =
+                pathWeight (pot.path c.src ++ [c]) := by
+                  simp [hkeep, hEdge]
+            _ = pot.val c.src + c.w := hWeightNew
+            _ = (incomingChoice pot v cs).val := hVal.symm
+            _ = Nat.max (pot.val v) (incomingChoice pot v cs).val := hmax.symm
 
 theorem positiveCycle_implies_not_satisfiable {α : Type} {cs : List (Constraint α)} :
     PositiveCycle cs → ¬ ∃ u : α → Nat, SatisfiesConstraints u cs := by
@@ -946,6 +1326,19 @@ theorem positiveCycle_implies_not_rationalizable (C : FiniteDescriptiveCore) (da
   have hSat : SatisfiesConstraints u (ConstraintsOfDataset C data) :=
     (rationalizesDataset_iff_satisfiesConstraints (C := C) (u := u) (data := data)).1 hR
   exact positiveCycle_implies_not_satisfiable (cs := ConstraintsOfDataset C data) hCycle ⟨u, hSat⟩
+
+theorem positiveCycle_iff_garpViolation_dataset (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    PositiveCycle (ConstraintsOfDataset C data) ↔ GARPViolation (ConstraintsOfDataset C data) := by
+  exact
+    positiveCycle_iff_garpViolation_of_allWeights01 (cs := ConstraintsOfDataset C data)
+      (ConstraintsOfDataset_allWeights01 (C := C) (data := data))
+
+theorem garpViolation_implies_not_rationalizable (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    GARPViolation (ConstraintsOfDataset C data) → ¬ ∃ u : C.Obj → Nat, RationalizesDataset C u data := by
+  intro hG
+  have hCycle : PositiveCycle (ConstraintsOfDataset C data) :=
+    (positiveCycle_iff_garpViolation_dataset (C := C) (data := data)).2 hG
+  exact positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle
 
 theorem positiveCycle_implies_solveUtility_eq_none (C : FiniteDescriptiveCore) (data : List (Observation C)) :
     PositiveCycle (ConstraintsOfDataset C data) → solveUtility C data = none := by
@@ -973,6 +1366,33 @@ theorem positiveCycle_implies_solveUtilityResult_is_fail (C : FiniteDescriptiveC
       -- after `cases`, the goal is definitionally a reflexive equality
       exact ⟨u, c, rfl⟩
 
+/-!
+### “Completeness targets” (statements we can now aim for)
+
+At this point we can already prove one direction *without* any extra finiteness:
+
+`SatisfiableConstraints cs → ¬ PositiveCycle cs`.
+
+The remaining “endgame” is the converse direction (under finiteness of the
+ambient object type): `¬ PositiveCycle cs → SatisfiableConstraints cs`, yielding
+decidability with dual certificates (utility vs. positive cycle).
+-/
+
+def SatisfiableConstraints {α : Type} (cs : List (Constraint α)) : Prop :=
+  ∃ u : α → Nat, SatisfiesConstraints u cs
+
+theorem satisfiableConstraints_implies_noPositiveCycle {α : Type} {cs : List (Constraint α)} :
+    SatisfiableConstraints cs → ¬ PositiveCycle cs := by
+  intro hSat hCycle
+  exact positiveCycle_implies_not_satisfiable (cs := cs) hCycle hSat
+
+theorem exists_rationalizer_implies_noPositiveCycle (C : FiniteDescriptiveCore) (data : List (Observation C)) :
+    (∃ u : C.Obj → Nat, RationalizesDataset C u data) → ¬ PositiveCycle (ConstraintsOfDataset C data) := by
+  intro hex hCycle
+  have : ¬ ∃ u : C.Obj → Nat, RationalizesDataset C u data :=
+    positiveCycle_implies_not_rationalizable (C := C) (data := data) hCycle
+  exact this hex
+
 /- AXIOM_AUDIT_BEGIN -/
 /-!
 ## Axiom audit
@@ -984,6 +1404,9 @@ theorem positiveCycle_implies_solveUtilityResult_is_fail (C : FiniteDescriptiveC
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_success_sound
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.solveUtilityResult_fail_sound
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.positiveCycle_implies_not_rationalizable
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.positiveCycle_iff_garpViolation_dataset
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.garpViolation_implies_not_rationalizable
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.satisfiableConstraints_implies_noPositiveCycle
 /- AXIOM_AUDIT_END -/
 
 end FiniteDescriptiveCore
