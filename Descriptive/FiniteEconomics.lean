@@ -409,6 +409,88 @@ theorem exists_utilityMaximizer_of_exists_feasible (C : FiniteDescriptiveCore) (
         exact hyMem'
       exact ⟨y, demandList_sound (C := C) (u := u) (t := t) (y := y) hyList⟩
 
+/-!
+## Deterministic choice (tie-break)
+
+`demandList` is a correspondence (a list of all maximizers). For economics, it is
+often useful to turn this into a single-valued choice function by adding a
+deterministic tie-break rule. Constructively, we can pick the head of the list.
+-/
+
+def chooseHead {α : Type} : List α → Option α
+  | [] => none
+  | x :: _ => some x
+
+theorem chooseHead_eq_some_implies_mem {α : Type} {xs : List α} {y : α} :
+    chooseHead xs = some y → y ∈ xs := by
+  intro h
+  cases xs with
+  | nil =>
+      dsimp [chooseHead] at h
+      cases h
+  | cons x xs =>
+      dsimp [chooseHead] at h
+      have hx : x = y := by
+        cases h
+        rfl
+      cases hx
+      exact List.Mem.head xs
+
+def demandChoice (C : FiniteDescriptiveCore) (u : C.Obj → Nat) (t : Term) : Option C.Obj :=
+  chooseHead (demandList C u t)
+
+theorem demandChoice_sound (C : FiniteDescriptiveCore) (u : C.Obj → Nat) {t : Term} {y : C.Obj} :
+    demandChoice C u t = some y → UtilityMaximizer (toDescriptiveSemantics C) u y t := by
+  intro h
+  have hyMem : y ∈ demandList C u t :=
+    chooseHead_eq_some_implies_mem (xs := demandList C u t) (y := y) h
+  exact demandList_sound (C := C) (u := u) (t := t) (y := y) hyMem
+
+theorem exists_demandChoice_of_exists_utilityMaximizer (C : FiniteDescriptiveCore) (u : C.Obj → Nat)
+    {t : Term} (hMax : ∃ y : C.Obj, UtilityMaximizer (toDescriptiveSemantics C) u y t) :
+    ∃ y : C.Obj, demandChoice C u t = some y ∧ UtilityMaximizer (toDescriptiveSemantics C) u y t := by
+  rcases hMax with ⟨y0, hy0⟩
+  have hy0List : y0 ∈ demandList C u t :=
+    demandList_complete (C := C) (u := u) (t := t) (y := y0) hy0
+  cases hdl : demandList C u t with
+  | nil =>
+      have hy0' := hy0List
+      rw [hdl] at hy0'
+      cases hy0'
+  | cons y ys =>
+      refine ⟨y, ?_, ?_⟩
+      · dsimp [demandChoice]
+        rw [hdl]
+        rfl
+      · have hyMem : y ∈ demandList C u t := by
+          rw [hdl]
+          exact List.Mem.head ys
+        exact demandList_sound (C := C) (u := u) (t := t) (y := y) hyMem
+
+/-!
+## Revealed preference (rationalization)
+
+Define a revealed preference relation from the (single-valued) demand. In this
+constructive finite setting, it is automatically rationalized by `u`.
+-/
+
+def RevealsWeakPref (C : FiniteDescriptiveCore) (u : C.Obj → Nat) (y z : C.Obj) : Prop :=
+  ∃ t : Term, demandChoice C u t = some y ∧ Feasible (toDescriptiveSemantics C) z t
+
+theorem revealsWeakPref_implies_ule (C : FiniteDescriptiveCore) (u : C.Obj → Nat) {y z : C.Obj} :
+    RevealsWeakPref C u y z → u z ≤ u y := by
+  rintro ⟨t, hyChoice, hzFeas⟩
+  have hyMax : UtilityMaximizer (toDescriptiveSemantics C) u y t :=
+    demandChoice_sound (C := C) (u := u) (t := t) (y := y) hyChoice
+  exact hyMax.2 z hzFeas
+
+theorem revealsWeakPref_bi_implies_utility_eq (C : FiniteDescriptiveCore) (u : C.Obj → Nat) {y z : C.Obj} :
+    RevealsWeakPref C u y z → RevealsWeakPref C u z y → u y = u z := by
+  intro hyz hzy
+  apply Nat.le_antisymm
+  · exact revealsWeakPref_implies_ule (C := C) (u := u) (y := z) (z := y) hzy
+  · exact revealsWeakPref_implies_ule (C := C) (u := u) (y := y) (z := z) hyz
+
 /- AXIOM_AUDIT_BEGIN -/
 /-!
 ## Axiom audit
@@ -417,6 +499,9 @@ theorem exists_utilityMaximizer_of_exists_feasible (C : FiniteDescriptiveCore) (
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.demandList_sound
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.demandList_complete
 #print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_utilityMaximizer_of_exists_feasible
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.demandChoice_sound
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.exists_demandChoice_of_exists_utilityMaximizer
+#print axioms Descriptive.Faithful.FiniteDescriptiveCore.revealsWeakPref_implies_ule
 /- AXIOM_AUDIT_END -/
 
 end FiniteDescriptiveCore
